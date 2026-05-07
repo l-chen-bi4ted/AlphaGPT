@@ -1,157 +1,199 @@
+"""
+AlphaEngine — RL 因子挖掘引擎（OKX CEX 适配版）。
+
+训练循环：
+  1. OKXDataLoader 拉取 K 线 → 特征张量
+  2. AlphaGPT 采样公式 token 序列 → StackVM 执行
+  3. CEXBacktest 评估 → REINFORCE 梯度更新
+  4. Newton-Schulz LoRD 正则化
+"""
+
+import json
+import os
+
 import torch
 from torch.distributions import Categorical
 from tqdm import tqdm
-import json
 
 from .config import ModelConfig
-from .data_loader import CryptoDataLoader
 from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import StackVM
-from .backtest import MemeBacktest
+from .backtest import CEXBacktest
+
 
 class AlphaEngine:
-    def __init__(self, use_lord_regularization=True, lord_decay_rate=1e-3, lord_num_iterations=5):
-        """
-        Initialize AlphaGPT training engine.
-        
-        Args:
-            use_lord_regularization: Enable Low-Rank Decay (LoRD) regularization
-            lord_decay_rate: Strength of LoRD regularization
-            lord_num_iterations: Number of Newton-Schulz iterations per step
-        """
-        self.loader = CryptoDataLoader()
+    """
+    符号回归因子挖掘引擎。
+
+    Args:
+        inst_id: OKX 交易对（默认 BTC-USDT）
+        bar: K 线周期（默认 1H）
+        candle_limit: 拉取条数
+        use_lord: 是否启用 LoRD 正则化
+        lord_decay_rate: LoRD 衰减强度
+    """
+
+    def __init__(
+        self,
+        inst_id: str = None,
+        bar: str = None,
+        candle_limit: int = None,
+        use_lord_regularization: bool = True,
+        lord_decay_rate: float = 1e-3,
+    ):
+        # 延迟导入，避免循环依赖
+        from okx_data import OKXDataLoader
+
+        self.inst_id = inst_id or ModelConfig.INST_ID
+        self.bar = bar or ModelConfig.BAR
+        self.limit = candle_limit or ModelConfig.CANDLE_LIMIT
+
+        print(f"Loading {self.inst_id} {self.bar} data...")
+        self.loader = OKXDataLoader(self.inst_id, self.bar, self.limit)
         self.loader.load_data()
-        
+
         self.model = AlphaGPT().to(ModelConfig.DEVICE)
-        
-        # Standard optimizer
-        self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
-        
-        # Low-Rank Decay regularizer
+        self.opt = torch.optim.AdamW(
+            self.model.parameters(), lr=ModelConfig.LEARNING_RATE
+        )
+
         self.use_lord = use_lord_regularization
         if self.use_lord:
             self.lord_opt = NewtonSchulzLowRankDecay(
                 self.model.named_parameters(),
                 decay_rate=lord_decay_rate,
-                num_iterations=lord_num_iterations,
-                target_keywords=["q_proj", "k_proj", "attention", "qk_norm"]
+                target_keywords=["q_proj", "k_proj", "attention", "qk_norm"],
             )
             self.rank_monitor = StableRankMonitor(
-                self.model,
-                target_keywords=["q_proj", "k_proj"]
+                self.model, target_keywords=["q_proj", "k_proj"]
             )
         else:
             self.lord_opt = None
             self.rank_monitor = None
-        
+
         self.vm = StackVM()
-        self.bt = MemeBacktest()
-        
-        self.best_score = -float('inf')
+        self.bt = CEXBacktest()
+
+        self.best_score = -float("inf")
         self.best_formula = None
         self.training_history = {
-            'step': [],
-            'avg_reward': [],
-            'best_score': [],
-            'stable_rank': []
+            "step": [],
+            "avg_reward": [],
+            "best_score": [],
+            "stable_rank": [],
         }
 
     def train(self):
-        print("🚀 Starting Meme Alpha Mining with LoRD Regularization..." if self.use_lord else "🚀 Starting Meme Alpha Mining...")
+        label = f"{self.inst_id} {self.bar}"
+        print(f"🚀 AlphaGPT CEX Training [{label}]")
         if self.use_lord:
-            print(f"   LoRD Regularization enabled")
-            print(f"   Target keywords: ['q_proj', 'k_proj', 'attention', 'qk_norm']")
-        
+            print("   LoRD Regularization: enabled")
+
         pbar = tqdm(range(ModelConfig.TRAIN_STEPS))
-        
+        device = ModelConfig.DEVICE
+
         for step in pbar:
             bs = ModelConfig.BATCH_SIZE
-            inp = torch.zeros((bs, 1), dtype=torch.long, device=ModelConfig.DEVICE)
-            
+            inp = torch.zeros((bs, 1), dtype=torch.long, device=device)
+
             log_probs = []
             tokens_list = []
-            
+
+            # 自回归采样公式
             for _ in range(ModelConfig.MAX_FORMULA_LEN):
                 logits, _, _ = self.model(inp)
                 dist = Categorical(logits=logits)
                 action = dist.sample()
-                
                 log_probs.append(dist.log_prob(action))
                 tokens_list.append(action)
                 inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
-            
-            seqs = torch.stack(tokens_list, dim=1)
-            
-            rewards = torch.zeros(bs, device=ModelConfig.DEVICE)
-            
+
+            seqs = torch.stack(tokens_list, dim=1)  # [B, L]
+            rewards = torch.zeros(bs, device=device)
+
+            # 评估每个采样公式
             for i in range(bs):
                 formula = seqs[i].tolist()
-                
                 res = self.vm.execute(formula, self.loader.feat_tensor)
-                
                 if res is None:
                     rewards[i] = -5.0
                     continue
-                
                 if res.std() < 1e-4:
                     rewards[i] = -2.0
                     continue
-                
-                score, ret_val = self.bt.evaluate(res, self.loader.raw_data_cache, self.loader.target_ret)
+                score, ret_val = self.bt.evaluate(
+                    res, self.loader.raw_data_cache, self.loader.target_ret
+                )
                 rewards[i] = score
-                
+
                 if score.item() > self.best_score:
                     self.best_score = score.item()
                     self.best_formula = formula
-                    tqdm.write(f"[!] New King: Score {score:.2f} | Ret {ret_val:.2%} | Formula {formula}")
-            
-            # Normalize rewards
+                    tqdm.write(
+                        f"[!] New Best: Score {score:.2f} | Ret {ret_val:.2%} | "
+                        f"Formula {formula}"
+                    )
+
+            # REINFORCE 损失
             adv = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
-            
-            loss = 0
-            for t in range(len(log_probs)):
-                loss += -log_probs[t] * adv
-            
-            loss = loss.mean()
-            
-            # Gradient step
+            loss = sum(-lp * adv for lp in log_probs).mean()
+
             self.opt.zero_grad()
             loss.backward()
             self.opt.step()
-            
-            # Apply Low-Rank Decay regularization
+
             if self.use_lord:
                 self.lord_opt.step()
-            
-            # Logging
-            avg_reward = rewards.mean().item()
-            postfix_dict = {'AvgRew': f"{avg_reward:.3f}", 'BestScore': f"{self.best_score:.3f}"}
-            
-            if self.use_lord and step % 100 == 0:
-                stable_rank = self.rank_monitor.compute()
-                postfix_dict['Rank'] = f"{stable_rank:.2f}"
-                self.training_history['stable_rank'].append(stable_rank)
-            
-            self.training_history['step'].append(step)
-            self.training_history['avg_reward'].append(avg_reward)
-            self.training_history['best_score'].append(self.best_score)
-            
-            pbar.set_postfix(postfix_dict)
 
-        # Save best formula
-        with open("best_meme_strategy.json", "w") as f:
-            json.dump(self.best_formula, f)
-        
-        # Save training history
-        import json as js
-        with open("training_history.json", "w") as f:
-            js.dump(self.training_history, f)
-        
-        print(f"\n✓ Training completed!")
+            # 日志
+            avg_reward = rewards.mean().item()
+            postfix = {
+                "AvgRew": f"{avg_reward:.3f}",
+                "Best": f"{self.best_score:.3f}",
+            }
+
+            if self.use_lord and step % 100 == 0:
+                sr = self.rank_monitor.compute()
+                postfix["Rank"] = f"{sr:.2f}"
+                self.training_history["stable_rank"].append(sr)
+
+            self.training_history["step"].append(step)
+            self.training_history["avg_reward"].append(avg_reward)
+            self.training_history["best_score"].append(self.best_score)
+            pbar.set_postfix(postfix)
+
+        self._save_results()
+
+    def _save_results(self):
+        os.makedirs(ModelConfig.SAVE_DIR, exist_ok=True)
+
+        prefix = f"{self.inst_id.replace('-','')}_{self.bar}"
+
+        # 最优公式
+        formula_path = os.path.join(ModelConfig.SAVE_DIR, f"{prefix}_formula.json")
+        with open(formula_path, "w") as f:
+            json.dump(
+                {
+                    "inst_id": self.inst_id,
+                    "bar": self.bar,
+                    "score": self.best_score,
+                    "formula": self.best_formula,
+                },
+                f,
+                indent=2,
+            )
+
+        # 训练历史
+        hist_path = os.path.join(ModelConfig.SAVE_DIR, f"{prefix}_history.json")
+        with open(hist_path, "w") as f:
+            json.dump(self.training_history, f, indent=2)
+
+        print(f"\n✓ Training completed [{self.inst_id} {self.bar}]")
         print(f"  Best score: {self.best_score:.4f}")
         print(f"  Best formula: {self.best_formula}")
+        print(f"  Saved to: {formula_path}")
 
 
 if __name__ == "__main__":
-    eng = AlphaEngine(use_lord_regularization=True)
+    eng = AlphaEngine()
     eng.train()
