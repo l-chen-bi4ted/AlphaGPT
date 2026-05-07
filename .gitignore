@@ -56,3 +56,8 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# Data cache (large CSV files)
+data_cache/
+output/
+

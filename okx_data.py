@@ -60,10 +60,14 @@ def _fetch_candles_page(
     if before:
         params["before"] = str(before)
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
     for attempt in range(3):
         try:
             resp = requests.get(
-                f"{OKX_REST_URL}{path}", params=params, timeout=15
+                f"{OKX_REST_URL}{path}", params=params, timeout=15, headers=headers
             )
             if resp.status_code == 429:
                 wait = 2 ** attempt
@@ -137,23 +141,38 @@ class OKXDataLoader:
         bar: str = "1H",
         limit: int = 2000,
         train_ratio: float = 0.7,
+        cache_dir: Optional[str] = None,
     ):
         self.inst_id = inst_id
         self.bar = bar
         self.limit = limit
         self.train_ratio = train_ratio
+        # 默认缓存目录：项目根 data_cache/
+        if cache_dir is None:
+            cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data_cache")
+        self.cache_dir = cache_dir
 
         self.feat_tensor: Optional[torch.Tensor] = None
         self.raw_data_cache: Optional[dict] = None
         self.target_ret: Optional[torch.Tensor] = None
         self.full_df: Optional[pd.DataFrame] = None  # 原始数据（用于回测可视化）
 
+    def _cache_path(self) -> str:
+        """本地缓存文件路径：data_cache/BTCUSDT_1H.csv"""
+        fname = f"{self.inst_id.replace('-', '')}_{self.bar}.csv"
+        return os.path.join(self.cache_dir, fname)
+
     def load_data(self):
-        """拉取 OKX K 线 → 构造 FeatureEngineer 所需张量。"""
-        print(f"Fetching {self.inst_id} {self.bar} candles...")
-        df = fetch_all_candles(self.inst_id, self.bar, self.limit)
-        if df.empty:
-            raise RuntimeError(f"No data for {self.inst_id}")
+        """优先读本地 CSV 缓存；无缓存则联网拉取。"""
+        cache_path = self._cache_path()
+        if os.path.exists(cache_path):
+            print(f"Loading from cache: {cache_path}")
+            df = pd.read_csv(cache_path).tail(self.limit)
+        else:
+            print(f"Fetching {self.inst_id} {self.bar} candles from OKX...")
+            df = fetch_all_candles(self.inst_id, self.bar, self.limit)
+            if df.empty:
+                raise RuntimeError(f"No data for {self.inst_id}")
 
         print(f"  Got {len(df)} candles: {df['ts'].min()} → {df['ts'].max()}")
         self.full_df = df
