@@ -73,15 +73,17 @@ class OKXExecutor:
 
     # ─── 请求 ────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
-        url = f"{OKX_REST_URL}{path}"
-        # GET: query params → URL, sign with empty body
-        # POST: json body → data, sign with json string
-        if method == "GET":
+        if method == "GET" and body:
+            # GET query params must be in the signed path
+            from urllib.parse import urlencode
+            qs = urlencode(body)
+            path = f"{path}?{qs}"
             body_str = ""
-            params = body
+            params = None
         else:
             body_str = json.dumps(body) if body else ""
-            params = None
+            params = body if method == "GET" else None
+        url = f"{OKX_REST_URL}{path}"
         headers = self._headers(method, path, body_str)
 
         for attempt in range(3):
