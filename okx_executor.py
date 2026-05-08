@@ -74,13 +74,20 @@ class OKXExecutor:
     # ─── 请求 ────────────────────────────────────────────
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> dict:
         url = f"{OKX_REST_URL}{path}"
-        body_str = json.dumps(body) if body else ""
+        # GET: query params → URL, sign with empty body
+        # POST: json body → data, sign with json string
+        if method == "GET":
+            body_str = ""
+            params = body
+        else:
+            body_str = json.dumps(body) if body else ""
+            params = None
         headers = self._headers(method, path, body_str)
 
         for attempt in range(3):
             try:
                 if method == "GET":
-                    resp = requests.get(url, headers=headers, timeout=10, params=body)
+                    resp = requests.get(url, headers=headers, timeout=10, params=params)
                 else:
                     resp = requests.post(url, headers=headers, data=body_str, timeout=10)
 
