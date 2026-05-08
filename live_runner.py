@@ -63,27 +63,23 @@ class LiveRunner:
             return 0.5
 
         device = ModelConfig.DEVICE
-        t = lambda col: torch.tensor(
-            df[col].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0).unsqueeze(0)
 
-        # 简陋版特征（与 FeatureEngineer 对齐先只看 close）
-        # 实际应使用 okx_data.raw_data_cache 格式
+        # 与 okx_data.raw_data_cache 格式对齐: [1, T]
         close = torch.tensor(
             df["close"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0).unsqueeze(0)
+        ).unsqueeze(0)
         open_ = torch.tensor(
             df["open"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0).unsqueeze(0)
+        ).unsqueeze(0)
         high = torch.tensor(
             df["high"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0).unsqueeze(0)
+        ).unsqueeze(0)
         low = torch.tensor(
             df["low"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0).unsqueeze(0)
+        ).unsqueeze(0)
         vol = torch.tensor(
             df["vol"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0).unsqueeze(0)
+        ).unsqueeze(0)
 
         # 模拟 raw_data_cache 格式用于 FeatureEngineer
         raw = {
