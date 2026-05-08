@@ -12,9 +12,9 @@ OKX = "https://www.okx.com"
 HDR = {"User-Agent": "Mozilla/5.0 Chrome/120.0"}
 CACHE = os.path.join(os.path.dirname(__file__), "data_cache")
 SYMBOLS = [
-    ("BTC-USDT", "1H", 2000),
-    ("ETH-USDT", "1H", 2000),
-    ("SOL-USDT", "1H", 2000),
+    ("BTC-USDT", "1H", 5000),
+    ("ETH-USDT", "1H", 5000),
+    ("SOL-USDT", "1H", 5000),
 ]
 
 

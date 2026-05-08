@@ -188,7 +188,7 @@ class AlphaEngine:
         with open(hist_path, "w") as f:
             json.dump(self.training_history, f, indent=2)
 
-        print(f"\n✓ Training completed [{self.inst_id} {self.bar}]")
+        print(f"\n[OK] Training completed [{self.inst_id} {self.bar}]")
         print(f"  Best score: {self.best_score:.4f}")
         print(f"  Best formula: {self.best_formula}")
         print(f"  Saved to: {formula_path}")
