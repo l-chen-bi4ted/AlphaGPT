@@ -129,9 +129,12 @@ class LiveRunner:
                         price = ticker.get("last", 0)
                         sz = trade_usd / price if price > 0 else 0
                         if sz > 0:
-                            self.executor.market_buy(self.inst_id, sz)
-                            self.position = "long"
-                            logger.success(f"ENTER LONG: {sz:.4f} @ {price}")
+                            oid = self.executor.market_buy(self.inst_id, sz)
+                            if oid:
+                                self.position = "long"
+                                logger.success(f"ENTER LONG: {sz:.4f} @ {price}  ordId={oid}")
+                            else:
+                                logger.error(f"ORDER FAILED: buy {sz:.4f} {self.inst_id}")
 
                 elif signal < 0.3 and self.position == "long":
                     # 平仓
