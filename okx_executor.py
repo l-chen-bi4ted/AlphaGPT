@@ -24,6 +24,9 @@ import requests
 
 OKX_REST_URL = "https://www.okx.com"
 
+# 跳过系统代理（macOS Charles/mitmproxy 等会阻断 SSL）
+PROXY_NONE = {"http": None, "https": None}
+
 
 class OKXExecutor:
     """OKX 现货交易执行器。"""
@@ -89,9 +92,9 @@ class OKXExecutor:
         for attempt in range(3):
             try:
                 if method == "GET":
-                    resp = requests.get(url, headers=headers, timeout=10, params=params)
+                    resp = requests.get(url, headers=headers, timeout=10, params=params, proxies=PROXY_NONE)
                 else:
-                    resp = requests.post(url, headers=headers, data=body_str, timeout=10)
+                    resp = requests.post(url, headers=headers, data=body_str, timeout=10, proxies=PROXY_NONE)
 
                 if resp.status_code == 429:
                     wait = 2 ** attempt
@@ -199,6 +202,7 @@ class OKXExecutor:
             params={"instId": inst_id},
             headers={"User-Agent": "Mozilla/5.0 Chrome/120.0"},
             timeout=10,
+            proxies=PROXY_NONE,
         )
         data = resp.json()
         if data.get("code") != "0":
