@@ -14,18 +14,17 @@ import os
 import time
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import torch
 import numpy as np
-from dotenv import load_dotenv
 from loguru import logger
 
 from model_core.vm import StackVM
 from model_core.config import ModelConfig
 from okx_data import fetch_all_candles
 from okx_executor import OKXExecutor
-
-
-load_dotenv()
 
 
 class LiveRunner:
