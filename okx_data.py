@@ -149,7 +149,7 @@ class OKXDataLoader:
         self.train_ratio = train_ratio
         # 默认缓存目录：项目根 data_cache/
         if cache_dir is None:
-            cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data_cache")
+            cache_dir = os.path.join(os.path.dirname(__file__), "data_cache")
         self.cache_dir = cache_dir
 
         self.feat_tensor: Optional[torch.Tensor] = None
