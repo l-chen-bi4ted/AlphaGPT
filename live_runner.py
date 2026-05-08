@@ -110,6 +110,7 @@ class LiveRunner:
     async def run(self, interval_seconds: int = 3600):
         """主循环。interval_seconds 默认 1 小时（与 1H K 线周期一致）。"""
         mode = "DEMO" if self.demo else "LIVE"
+        base_ccy = self.inst_id.split("-")[0]
         logger.info(f"[{mode}] LiveRunner started on {self.inst_id} {self.bar}")
 
         while True:
@@ -128,10 +129,24 @@ class LiveRunner:
                         price = ticker.get("last", 0)
                         sz = trade_usd / price if price > 0 else 0
                         if sz > 0:
-                            oid = self.executor.market_buy(self.inst_id, sz)
+                            # 限价买入（ask 价），模拟盘市价单流动性不足
+                            ask = ticker.get("ask", price)
+                            bal_before = self.executor.get_balance()
+                            base_before = bal_before.get(base_ccy, 0)
+                            oid = self.executor.limit_buy(self.inst_id, sz, ask)
                             if oid:
-                                self.position = "long"
-                                logger.success(f"ENTER LONG: {sz:.4f} @ {price}  ordId={oid}")
+                                await asyncio.sleep(3)
+                                bal_after = self.executor.get_balance()
+                                base_after = bal_after.get(base_ccy, 0)
+                                filled = base_after - base_before
+                                if filled > 0:
+                                    self.position = "long"
+                                    logger.success(
+                                        f"ENTER LONG: filled {filled:.6f} {base_ccy} "
+                                        f"(req {sz:.4f}) @ ~{price}  ordId={oid}"
+                                    )
+                                else:
+                                    logger.warning(f"ORDER NO FILL: ordId={oid}")
                             else:
                                 logger.error(f"ORDER FAILED: buy {sz:.4f} {self.inst_id}")
 
@@ -152,7 +167,13 @@ class LiveRunner:
         base = self.inst_id.split("-")[0]
         amount = bal.get(base, 0)
         if amount > 0:
-            self.executor.market_sell(self.inst_id, amount)
+            ticker = OKXExecutor.get_ticker(self.inst_id)
+            bid = ticker.get("bid", ticker.get("last", 0))
+            oid = self.executor.limit_sell(self.inst_id, amount, bid)
+            if oid:
+                logger.success(f"EXIT LONG: sold {amount} {base}  ordId={oid}")
+            else:
+                logger.error(f"EXIT FAILED: {amount} {base}")
 
 
 if __name__ == "__main__":
