@@ -12,6 +12,7 @@ import asyncio
 import json
 import os
 import time
+from collections import deque
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -65,7 +66,11 @@ class LiveRunner:
 
     # ─── 信号计算 ────────────────────────────────────────
     def _compute_signal(self) -> float:
-        """拉取最新数据 → 计算公式 → 返回信号概率。"""
+        """拉取最新数据 → 计算公式 → 滚动 z-score 标准化 → 返回信号。
+
+        不依赖公式输出的绝对值，而是对比历史窗口内的相对强度。
+        适配任何市场（BTC/ETH/SOL/A 股等），自动适应不同价格级别和公式输出尺度。
+        """
         df = fetch_all_candles(self.inst_id, self.bar, limit=200)
         if df.empty or len(df) < 50:
             logger.warning("Not enough data for signal")
@@ -73,7 +78,6 @@ class LiveRunner:
 
         device = ModelConfig.DEVICE
 
-        # 与 okx_data.raw_data_cache 格式对齐: [1, T]
         close = torch.tensor(
             df["close"].values[-200:], dtype=torch.float32, device=device
         ).unsqueeze(0)
@@ -90,7 +94,6 @@ class LiveRunner:
             df["vol"].values[-200:], dtype=torch.float32, device=device
         ).unsqueeze(0)
 
-        # 模拟 raw_data_cache 格式用于 FeatureEngineer
         raw = {
             "close": close,
             "open": open_,
@@ -108,8 +111,30 @@ class LiveRunner:
         if res is None:
             return 0.5
 
-        signal = float(torch.sigmoid(res[0, -1]).item())
-        return signal
+        # ── 滚动 z-score 标准化 ──
+        # 取整个公式输出序列的最后一帧，放入历史窗口
+        raw_seq = res[0, :].cpu().numpy()  # [T]
+        current = float(raw_seq[-1])
+
+        if not hasattr(self, "_signal_hist"):
+            self._signal_hist = deque(maxlen=200)
+
+        self._signal_hist.append(current)
+
+        if len(self._signal_hist) < 30:
+            # 历史不够，用中性值
+            return 0.5
+
+        arr = np.array(self._signal_hist)
+        # 用中位数 + MAD 做稳健标准化（不受极端值干扰）
+        median = np.median(arr)
+        mad = np.median(np.abs(arr - median)) + 1e-8
+        z = 0.6745 * (current - median) / mad  # 近似标准正态 z-score
+
+        # z-score → 0-1 信号
+        # z=0 → 0.5, z=+2 → ~0.88, z=-2 → ~0.12
+        signal = 1.0 / (1.0 + np.exp(-z))
+        return float(np.clip(signal, 0.01, 0.99))
 
     # ─── 持仓比例 ──────────────────────────────────────
     def _get_usdt_balance(self) -> float:
