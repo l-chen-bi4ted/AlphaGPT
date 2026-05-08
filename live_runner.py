@@ -121,7 +121,7 @@ class LiveRunner:
                 if signal > ModelConfig.SIGNAL_THRESHOLD and self.position is None:
                     # 入场：做多
                     usdt = self._get_usdt_balance()
-                    trade_usd = min(usdt * 0.5, ModelConfig.TRADE_SIZE_USD)
+                    trade_usd = min(usdt, ModelConfig.TRADE_SIZE_USD)
                     if trade_usd < 10:
                         logger.warning("Insufficient balance")
                     else:
