@@ -51,7 +51,17 @@ class LiveRunner:
 
         self.vm = StackVM()
         self.executor = OKXExecutor(demo=demo)
-        self.position = None  # 当前持仓方向：None / "long"
+
+        # 启动时检查实际持仓，防止网络抖动导致状态丢失
+        self.position = None
+        try:
+            bal = self.executor.get_balance()
+            base = self.inst_id.split("-")[0]
+            if bal.get(base, 0) > 0.0001:
+                self.position = "long"
+                logger.info(f"Reconciled: existing {base} position ({bal[base]:.6f})")
+        except Exception:
+            pass
 
     # ─── 信号计算 ────────────────────────────────────────
     def _compute_signal(self) -> float:
