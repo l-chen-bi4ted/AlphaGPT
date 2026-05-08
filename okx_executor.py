@@ -65,6 +65,7 @@ class OKXExecutor:
             "OK-ACCESS-TIMESTAMP": ts,
             "OK-ACCESS-PASSPHRASE": self.passphrase,
             "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 Chrome/120.0",
         }
         if self.demo:
             headers["x-simulated-trading"] = "1"
@@ -187,6 +188,7 @@ class OKXExecutor:
         resp = requests.get(
             f"{OKX_REST_URL}/api/v5/market/ticker",
             params={"instId": inst_id},
+            headers={"User-Agent": "Mozilla/5.0 Chrome/120.0"},
             timeout=10,
         )
         data = resp.json()
