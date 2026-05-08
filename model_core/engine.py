@@ -85,7 +85,7 @@ class AlphaEngine:
 
     def train(self):
         label = f"{self.inst_id} {self.bar}"
-        print(f"🚀 AlphaGPT CEX Training [{label}]")
+        print(f"[AlphaGPT CEX Training {label}]")
         if self.use_lord:
             print("   LoRD Regularization: enabled")
 
