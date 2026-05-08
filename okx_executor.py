@@ -33,14 +33,13 @@ class OKXExecutor:
         api_key: Optional[str] = None,
         secret_key: Optional[str] = None,
         passphrase: Optional[str] = None,
-        demo: Optional[bool] = None,
+        demo: bool = True,
     ):
-        self.api_key = api_key or os.getenv("OKX_API_KEY", "")
-        self.secret_key = secret_key or os.getenv("OKX_SECRET_KEY", "")
-        self.passphrase = passphrase or os.getenv("OKX_PASSPHRASE", "")
-        if demo is None:
-            demo = os.getenv("OKX_DEMO", "true").lower() in ("true", "1", "yes")
         self.demo = demo
+        prefix = "OKX_DEMO_" if demo else "OKX_"
+        self.api_key = api_key or os.getenv(f"{prefix}API_KEY", "")
+        self.secret_key = secret_key or os.getenv(f"{prefix}SECRET_KEY", "")
+        self.passphrase = passphrase or os.getenv(f"{prefix}PASSPHRASE", "")
 
     # ─── 签名 ────────────────────────────────────────────
     def _sign(self, timestamp: str, method: str, path: str, body: str = "") -> str:

@@ -34,12 +34,10 @@ class LiveRunner:
         formula_path: Optional[str] = None,
         inst_id: Optional[str] = None,
         bar: str = "1H",
-        demo: Optional[bool] = None,
+        demo: bool = True,
     ):
         self.inst_id = inst_id or ModelConfig.INST_ID
         self.bar = bar
-        if demo is None:
-            demo = os.getenv("OKX_DEMO", "true").lower() in ("true", "1", "yes")
         self.demo = demo
 
         # 加载因子公式
