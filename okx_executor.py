@@ -33,11 +33,13 @@ class OKXExecutor:
         api_key: Optional[str] = None,
         secret_key: Optional[str] = None,
         passphrase: Optional[str] = None,
-        demo: bool = True,
+        demo: Optional[bool] = None,
     ):
         self.api_key = api_key or os.getenv("OKX_API_KEY", "")
         self.secret_key = secret_key or os.getenv("OKX_SECRET_KEY", "")
         self.passphrase = passphrase or os.getenv("OKX_PASSPHRASE", "")
+        if demo is None:
+            demo = os.getenv("OKX_DEMO", "true").lower() in ("true", "1", "yes")
         self.demo = demo
 
     # ─── 签名 ────────────────────────────────────────────
@@ -50,8 +52,14 @@ class OKXExecutor:
         ).digest()
         return base64.b64encode(sig).decode("utf-8")
 
+    @staticmethod
+    def _iso_timestamp() -> str:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
     def _headers(self, method: str, path: str, body: str = "") -> dict:
-        ts = str(int(time.time() * 1000))
+        ts = self._iso_timestamp()
         headers = {
             "OK-ACCESS-KEY": self.api_key,
             "OK-ACCESS-SIGN": self._sign(ts, method, path, body),

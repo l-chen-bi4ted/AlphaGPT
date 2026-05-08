@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """E2E test: data loading → training → formula output."""
+import os
 import sys
-sys.path.insert(0, "/tmp/AlphaGPT-fork")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 print("=== 1. Data Loading ===")
 from okx_data import OKXDataLoader
