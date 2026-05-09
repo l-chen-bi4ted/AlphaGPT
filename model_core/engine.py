@@ -78,6 +78,15 @@ class AlphaEngine:
             multi_dim=ModelConfig.MULTI_DIM_FITNESS,
         )
 
+        # ── 样本外 split（时间序列，前80%训练，后20%验证）──
+        T = self.loader.feat_tensor.shape[-1]
+        self.split_idx = int(T * 0.8)
+        self.train_feat = self.loader.feat_tensor[..., :self.split_idx]
+        self.train_target = self.loader.target_ret[..., :self.split_idx]
+        self.val_feat = self.loader.feat_tensor[..., self.split_idx:]
+        self.val_target = self.loader.target_ret[..., self.split_idx:]
+        print(f"  Train: {self.split_idx} candles | Val: {T - self.split_idx} candles")
+
         self.best_score = -float("inf")
         self.best_formula = None
         self.training_history = {
@@ -118,7 +127,7 @@ class AlphaEngine:
             # 评估每个采样公式
             for i in range(bs):
                 formula = seqs[i].tolist()
-                res = self.vm.execute(formula, self.loader.feat_tensor)
+                res = self.vm.execute(formula, self.train_feat)
                 if res is None:
                     rewards[i] = -5.0
                     continue
@@ -126,9 +135,14 @@ class AlphaEngine:
                     rewards[i] = -2.0
                     continue
                 score, ret_val = self.bt.evaluate(
-                    res, self.loader.raw_data_cache, self.loader.target_ret
+                    res, self.loader.raw_data_cache, self.train_target
                 )
                 rewards[i] = score
+
+                # 奥卡姆剃刀：公式越复杂扣分越多
+                n_unique = len(set(formula))
+                x = max(0, n_unique - 5) * 0.02  # 超过5种算子开始轻微惩罚
+                rewards[i] -= x
 
                 if score.item() > self.best_score:
                     self.best_score = score.item()
@@ -173,6 +187,17 @@ class AlphaEngine:
 
         prefix = f"{self.inst_id.replace('-','')}_{self.bar}"
 
+        # ── 样本外验证 ──
+        val_score = -999.0
+        val_ret = 0.0
+        if self.best_formula is not None:
+            res_val = self.vm.execute(self.best_formula, self.val_feat)
+            if res_val is not None and res_val.std() > 1e-4:
+                val_result, val_ret = self.bt.evaluate(
+                    res_val, self.loader.raw_data_cache, self.val_target
+                )
+                val_score = val_result.item()
+
         # 最优公式
         formula_path = os.path.join(ModelConfig.SAVE_DIR, f"{prefix}_formula.json")
         with open(formula_path, "w") as f:
@@ -180,7 +205,8 @@ class AlphaEngine:
                 {
                     "inst_id": self.inst_id,
                     "bar": self.bar,
-                    "score": self.best_score,
+                    "train_score": self.best_score,
+                    "val_score": val_score,
                     "formula": self.best_formula,
                 },
                 f,
@@ -193,7 +219,12 @@ class AlphaEngine:
             json.dump(self.training_history, f, indent=2)
 
         print(f"\n[OK] Training completed [{self.inst_id} {self.bar}]")
-        print(f"  Best score: {self.best_score:.4f}")
+        print(f"  Train score: {self.best_score:.4f}")
+        print(f"  Val score:   {val_score:.4f}  (OOS)")
+        print(f"  Val return:  {val_ret:.4%}")
+        if val_score > -900 and val_score < self.best_score * 0.3:
+            pct = val_score / self.best_score * 100
+            print(f"  !!! OVERFIT: val_score = {pct:.0f}% of train_score")
         print(f"  Best formula: {self.best_formula}")
         print(f"  Saved to: {formula_path}")
 

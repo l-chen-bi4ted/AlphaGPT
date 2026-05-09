@@ -144,6 +144,10 @@ class CEXBacktest:
             median_activity = activity[valid].median().item()
             if median_activity < self.min_trades * 2:
                 score -= 2.0
+
+            # ── 奥卡姆剃刀：复杂度惩罚 ──
+            # 无法从 factors 反推公式，此处留空但保留接口
+            # 实际惩罚在 engine.py 的 rewards 计算中应用
         else:
             # 兼容旧版打分
             big_dd = (valid_pnl < -0.02).float().sum(dim=1)
