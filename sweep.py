@@ -16,10 +16,9 @@ load_dotenv()
 from model_core.config import ModelConfig
 
 SWEEPS = [
-    {"BATCH_SIZE": 4096, "LEARNING_RATE": 3e-4, "TRAIN_STEPS": 300, "desc": "small batch, low lr"},
-    {"BATCH_SIZE": 4096, "LEARNING_RATE": 1e-3, "TRAIN_STEPS": 300, "desc": "small batch, mid lr"},
-    {"BATCH_SIZE": 8192, "LEARNING_RATE": 1e-3, "TRAIN_STEPS": 300, "desc": "large batch, mid lr"},
-    {"BATCH_SIZE": 8192, "LEARNING_RATE": 3e-3, "TRAIN_STEPS": 300, "desc": "large batch, high lr"},
+    {"BATCH_SIZE": 4096, "LEARNING_RATE": 1e-3, "TRAIN_STEPS": 500, "desc": "baseline"},
+    {"BATCH_SIZE": 8192, "LEARNING_RATE": 1e-3, "TRAIN_STEPS": 500, "desc": "large batch"},
+    {"BATCH_SIZE": 4096, "LEARNING_RATE": 3e-3, "TRAIN_STEPS": 500, "desc": "high lr"},
 ]
 
 
@@ -77,7 +76,7 @@ def run_one(inst_id, bar, params):
         seqs = torch.stack(tokens_list, dim=1)
         rewards = torch.zeros(bs, device=device)
 
-        for i in range(min(bs, 256)):  # Cap evaluation for speed
+        for i in range(bs):
             formula = seqs[i].tolist()
             res = vm.execute(formula, train_feat)
             if res is None or res.std() < 1e-4:
@@ -103,7 +102,7 @@ def run_one(inst_id, bar, params):
     res_train = vm.execute(best_formula, train_feat)
     res_val = vm.execute(best_formula, val_feat)
 
-    bt_adv = CEXBacktest(adversarial_trials=5, noise_std=0.02, multi_dim=True)
+    bt_adv = CEXBacktest(adversarial_trials=3, noise_std=0.02, multi_dim=True)
     train_score, _ = bt_adv.evaluate(res_train, loader.raw_data_cache, train_target)
     val_score, val_ret = bt_adv.evaluate(res_val, loader.raw_data_cache, val_target)
 
