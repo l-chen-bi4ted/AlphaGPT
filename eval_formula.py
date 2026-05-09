@@ -76,7 +76,7 @@ def evaluate_formula(
     加载数据 → 执行公式 → 样本外评估 → 返回完整报告。
     """
     print(f"\n{'='*60}")
-    print(f"  公式审计: {inst_id} {bar}")
+    print(f"  Formula Audit: {inst_id} {bar}")
     print(f"{'='*60}")
 
     # 1. 加载数据
@@ -149,37 +149,37 @@ def evaluate_formula(
 def print_report(r: dict):
     """格式化打印审计报告。"""
     if "error" in r:
-        print(f"\n  ❌ {r['error']}")
+        print(f"\n  [ERROR] {r['error']}")
         return
 
-    print(f"\n  📐 公式: {r['decoded']}")
-    print(f"  📊 复杂度: {r['complexity']['complexity_score']:.2f}  "
-          f"(唯一算子{r['complexity']['n_unique']}种, "
-          f"因子{r['complexity']['n_factors']}, "
-          f"算子{r['complexity']['n_ops']})")
+    print(f"\n  [Formula] {r['decoded']}")
+    print(f"  [Complexity] {r['complexity']['complexity_score']:.2f}  "
+          f"(unique_ops={r['complexity']['n_unique']}, "
+          f"factors={r['complexity']['n_factors']}, "
+          f"ops={r['complexity']['n_ops']})")
 
-    print(f"\n  {'─'*40}")
-    print(f"  {'指标':<15} {'训练集':>12} {'验证集(OOS)':>12}")
-    print(f"  {'─'*40}")
+    print(f"\n  {'-'*40}")
+    print(f"  {'Metric':<15} {'Train':>12} {'Val (OOS)':>12}")
+    print(f"  {'-'*40}")
     print(f"  {'Score':<15} {r['train_score']:>12.4f} {r['val_score']:>12.4f}")
     print(f"  {'Return':<15} {r['train_return']:>11.2%} {r['val_return']:>11.2%}")
 
     if r["adversarial_trials"] > 0:
-        print(f"\n  ⚡ 对抗模式: {r['adversarial_trials']} trials × noise {0.02}")
+        print(f"\n  [!] Adversarial mode: {r['adversarial_trials']} trials x noise 0.02")
 
     if r["overfit"]:
-        print(f"\n  🚨 过拟合警告: val_score 仅为 train_score 的 {r['overfit_pct']:.0f}%")
-        print(f"     公式可能在训练集上死记硬背，样本外表现显著下降。")
-        print(f"     建议：丢弃此公式，增加 adversarial_trials 重训。")
+        print(f"\n  [!!!] OVERFIT: val_score = {r['overfit_pct']:.0f}% of train_score")
+        print(f"     Formula memorized training data, fails out-of-sample.")
+        print(f"     SUGGEST: discard, retrain with higher adversarial_trials.")
     elif r["overfit_pct"] > 0:
-        print(f"\n  ✅ 泛化良好: val_score = train_score × {r['overfit_pct']:.0f}%")
+        print(f"\n  [OK] Generalization: val_score = {r['overfit_pct']:.0f}% of train")
     else:
-        print(f"\n  ⚠️  训练集收益为负，跳过过拟合检测")
+        print(f"\n  [WARN] Train return negative, overfit check skipped")
 
-    # 算子构成
-    print(f"\n  📋 算子构成:")
+    # Operator composition
+    print(f"\n  [Ops]")
     for name, count in sorted(r["complexity"]["composition"].items(), key=lambda x: -x[1]):
-        bar = "█" * min(count, 20)
+        bar = "#" * min(count, 20)
         print(f"     {name:<8} {count:>2}x  {bar}")
 
 
