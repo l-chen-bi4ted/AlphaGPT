@@ -25,6 +25,11 @@ class ModelConfig:
     TRADE_SIZE_USD = float(os.getenv("TRADE_SIZE_USD", "1000.0"))
     SIGNAL_THRESHOLD = float(os.getenv("SIGNAL_THRESHOLD", "0.5"))  # 信号 > 此值入场
 
+    # ─── v2 对抗回测 ────────────────────────────────────
+    ADVERSARIAL_TRIALS = int(os.getenv("ADVERSARIAL_TRIALS", "0"))  # 0=关闭
+    ADVERSARIAL_NOISE = float(os.getenv("ADVERSARIAL_NOISE", "0.02"))  # 噪声强度
+    MULTI_DIM_FITNESS = os.getenv("MULTI_DIM_FITNESS", "true").lower() in ("true", "1")
+
     # ─── 特征维度（与 FeatureEngineer.INPUT_DIM 一致）─────
     INPUT_DIM = 6
 

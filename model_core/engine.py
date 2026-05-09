@@ -72,7 +72,11 @@ class AlphaEngine:
             self.rank_monitor = None
 
         self.vm = StackVM()
-        self.bt = CEXBacktest()
+        self.bt = CEXBacktest(
+            adversarial_trials=ModelConfig.ADVERSARIAL_TRIALS,
+            noise_std=ModelConfig.ADVERSARIAL_NOISE,
+            multi_dim=ModelConfig.MULTI_DIM_FITNESS,
+        )
 
         self.best_score = -float("inf")
         self.best_formula = None
