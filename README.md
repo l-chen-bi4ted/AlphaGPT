@@ -1,88 +1,86 @@
-# AlphaGPT + OKX — CEX 符号回归量化交易
+# AlphaGPT (backtest-v2)
 
-基于 [AlphaGPT](https://github.com/imbue-bit/AlphaGPT) 的 OKX CEX 适配版。用强化学习在 OKX K 线数据上自动挖掘 alpha 因子公式，支持回测和实盘/模拟盘执行。
+基于强化学习的符号回归因子挖掘引擎，适配 OKX CEX 现货市场。
 
-## 与原项目的差异
+## 分支
 
-| | 原版 AlphaGPT | 本 Fork |
-|---|---|---|
-| 市场 | Solana Meme 币 | OKX CEX 现货 |
-| 数据源 | PostgreSQL + Birdeye/DexScreener | OKX REST API |
-| 执行层 | Jupiter DEX (Solana) | OKX REST API (HMAC) |
-| 费率模型 | 0.6% (Swap+Gas+Jito) | 0.1% (VIP0 taker) |
-| 依赖 | solana-py, solders, asyncpg | requests (纯 HTTP) |
-| macOS | 部分兼容 | 完全兼容 |
+| 分支 | 用途 |
+|------|------|
+| `main` | 上游原始版本（Solana Meme 币） |
+| `okx_dev` | OKX CEX 适配 + 模拟盘 live runner（稳定运行） |
+| `backtest-v2` | 新回测引擎 + IC reward + 样本外验证（活跃开发） |
 
-## 快速开始
+## 核心架构 (v2)
+
+```
+OKX K 线数据 → FeatureEngineer (6因子) → StackVM (RPN执行)
+                                              ↓
+AlphaGPT (Looped Transformer) → 采样公式token → Rank IC 评估
+                                              ↓
+                                    REINFORCE 梯度更新
+                                              ↓
+                              对抗噪声筛选 + 样本外验证
+```
+
+### 关键改进 (vs 上游)
+
+| 改进 | 说明 |
+|------|------|
+| **Rank IC 训练** | reward = IC × 10，替代脆弱的回测收益驱动 |
+| **样本外 split** | 时间序列 80% 训练 / 20% 验证，自动过拟合警告 |
+| **对抗筛选** | 因子注入噪声，取 worst-case 得分 |
+| **多维 fitness** | Sharpe + Sortino + 胜率 + 最大回撤 综合评分 |
+| **复杂度惩罚** | 奥卡姆剃刀：唯一算子 > 5 种开始扣分 |
+| **HJI Regret** | 与完美预知策略的机会成本差距 |
+
+## 工具
 
 ```bash
-# 1. 安装
-pip install -r requirements.txt
+# 公式审计 — 秒级 OOS 评估
+python eval_formula.py BTC-USDT 1H --adversarial 10
 
-# 2. 配环境变量（可选——训练不需要 API key）
-cp .env.example .env
+# 超参扫描 — 3 组 × 500 步，~1 小时/组
+python sweep.py BTC-USDT
 
-# 3. 训练因子公式
-python model_core/engine.py
-
-# 4. 查看结果
-cat output/BTCUSDT_1H_formula.json
+# 单品种深度训练
+python train_quick.py
 ```
 
-## 项目结构
+## IC 基准
 
-```
-AlphaGPT/
-├── okx_data.py              # OKX 行情数据拉取
-├── okx_executor.py          # OKX 实盘/模拟盘交易
-├── live_runner.py           # 实盘运行器
-├── model_core/              # 核心模型（复用原项目）
-│   ├── alphagpt.py          # Looped Transformer 模型
-│   ├── engine.py            # RL 训练引擎
-│   ├── backtest.py          # CEX 回测引擎
-│   ├── vm.py                # 后缀表达式虚拟机
-│   ├── ops.py               # 操作符集
-│   ├── factors.py           # 特征工程
-│   └── config.py            # 配置
-├── test_e2e.py              # 端到端测试
-└── train_quick.py           # 快速训练脚本
-```
+| IC 值 | 评价 |
+|-------|------|
+| > 0.05 | 优秀 |
+| 0.03 - 0.05 | 有效 |
+| < 0.03 | 弱/噪声 |
 
-## 配置
-
-通过 `.env` 文件或环境变量：
+## 环境
 
 ```bash
-OKX_INST_ID=BTC-USDT      # 交易对
-OKX_BAR=1H                # K 线周期 (1m/5m/15m/1H/4H/1D)
-OKX_CANDLE_LIMIT=2000     # 拉取条数
-
-# 以下仅实盘需要
-OKX_API_KEY=your_key
-OKX_SECRET_KEY=your_secret
-OKX_PASSPHRASE=your_passphrase
+pip install torch numpy pandas scipy requests python-dotenv tqdm loguru
 ```
 
-## 实盘/模拟盘
-
-```bash
-# 模拟盘（安全，不涉及真实资金）
-python live_runner.py          # 依赖 formula.json
-
-# 实盘（需配 API key）
-DEMO=false python live_runner.py
+CEX 交易需配置 `.env`：
+```
+OKX_API_KEY=xxx
+OKX_SECRET_KEY=xxx
+OKX_PASSPHRASE=xxx
+OKX_DEMO_API_KEY=xxx   # 模拟盘（可选）
+OKX_DEMO_SECRET_KEY=xxx
+OKX_DEMO_PASSPHRASE=xxx
 ```
 
-## 模型原理
+训练不需要 API key —— 使用 `data_cache/` 下的离线 CSV 数据。
 
-AlphaGPT 用 REINFORCE 强化学习训练一个小型 Looped Transformer，让它生成后缀表达式（逆波兰表示法）公式。每个公式被 StackVM 执行后，由 CEXBacktest 在历史 K 线上评估，回报作为奖励信号。
+## 当前公式
 
-核心创新：
-- **Looped Transformer**: 每层循环 3 次，增强表示能力
-- **QK-Norm + RMSNorm + SwiGLU**: 现代化 Transformer 组件
-- **Newton-Schulz LoRD**: 低秩正则化防止过拟合
-- **MTP Head**: 多任务池化头
+| 品种 | Train IC | Val IC | 训练方式 |
+|------|---------|--------|----------|
+| BTC v2 (liquidity) | 0.054 | 0.041 | 对抗回测 |
+| BTC v1 (price) | 0.020 | -0.014 | 旧版回测 |
+| ETH | 0.031 | 0.033 | 旧版回测 |
+| SOL | 0.019 | 0.000 | 旧版回测 |
 
-## License
+## 许可
 
-Apache 2.0（继承原项目）
+Apache 2.0
