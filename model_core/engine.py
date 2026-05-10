@@ -87,6 +87,10 @@ class AlphaEngine:
         self.val_target = self.loader.target_ret[..., self.split_idx:]
         print(f"  Train: {self.split_idx} candles | Val: {T - self.split_idx} candles")
 
+        # GPU: 训练数据搬上 CUDA（StackVM 所有算子自动在 GPU 执行）
+        self.train_feat = self.train_feat.to(ModelConfig.DEVICE)
+        self.train_target = self.train_target.to(ModelConfig.DEVICE)
+
         self.best_score = -float("inf")
         self.best_formula = None
         self.training_history = {
