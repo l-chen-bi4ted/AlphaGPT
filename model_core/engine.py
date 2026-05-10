@@ -124,7 +124,7 @@ class AlphaEngine:
             seqs = torch.stack(tokens_list, dim=1)  # [B, L]
             rewards = torch.zeros(bs, device=device)
 
-            # 评估每个采样公式
+            # 评估每个采样公式 — 用 Rank IC 做 reward（鲁棒、平滑）
             for i in range(bs):
                 formula = seqs[i].tolist()
                 res = self.vm.execute(formula, self.train_feat)
@@ -134,22 +134,20 @@ class AlphaEngine:
                 if res.std() < 1e-4:
                     rewards[i] = -2.0
                     continue
-                score, ret_val = self.bt.evaluate(
-                    res, self.loader.raw_data_cache, self.train_target
-                )
-                rewards[i] = score
 
-                # 奥卡姆剃刀：公式越复杂扣分越多
+                # Rank IC: 因子排序 vs 未来收益排序的相关性
+                ic = CEXBacktest.compute_rank_ic(res, self.train_target)
+                rewards[i] = ic * 10.0  # IC 0.03→0.3, IC 0.1→1.0
+
+                # 奥卡姆剃刀：公式越复杂微扣
                 n_unique = len(set(formula))
-                x = max(0, n_unique - 5) * 0.02  # 超过5种算子开始轻微惩罚
-                rewards[i] -= x
+                rewards[i] -= max(0, n_unique - 5) * 0.01
 
-                if score.item() > self.best_score:
-                    self.best_score = score.item()
+                if ic > self.best_score:
+                    self.best_score = ic
                     self.best_formula = formula
                     tqdm.write(
-                        f"[!] New Best: Score {score:.2f} | Ret {ret_val:.2%} | "
-                        f"Formula {formula}"
+                        f"[!] New Best: IC {ic:.4f} | Formula {formula}"
                     )
 
             # REINFORCE 损失
@@ -167,7 +165,7 @@ class AlphaEngine:
             avg_reward = rewards.mean().item()
             postfix = {
                 "AvgRew": f"{avg_reward:.3f}",
-                "Best": f"{self.best_score:.3f}",
+                "BestIC": f"{self.best_score:.4f}",
             }
 
             if self.use_lord and step % 100 == 0:
@@ -188,15 +186,16 @@ class AlphaEngine:
         prefix = f"{self.inst_id.replace('-','')}_{self.bar}"
 
         # ── 样本外验证 ──
-        val_score = -999.0
+        val_ic = -999.0
         val_ret = 0.0
         if self.best_formula is not None:
             res_val = self.vm.execute(self.best_formula, self.val_feat)
             if res_val is not None and res_val.std() > 1e-4:
+                val_ic = CEXBacktest.compute_rank_ic(res_val, self.val_target)
+                # 也跑一次对抗筛选参考
                 val_result, val_ret = self.bt.evaluate(
                     res_val, self.loader.raw_data_cache, self.val_target
                 )
-                val_score = val_result.item()
 
         # 最优公式
         formula_path = os.path.join(ModelConfig.SAVE_DIR, f"{prefix}_formula.json")
@@ -205,8 +204,8 @@ class AlphaEngine:
                 {
                     "inst_id": self.inst_id,
                     "bar": self.bar,
-                    "train_score": self.best_score,
-                    "val_score": val_score,
+                    "train_ic": self.best_score,
+                    "val_ic": val_ic,
                     "formula": self.best_formula,
                 },
                 f,
@@ -219,12 +218,11 @@ class AlphaEngine:
             json.dump(self.training_history, f, indent=2)
 
         print(f"\n[OK] Training completed [{self.inst_id} {self.bar}]")
-        print(f"  Train score: {self.best_score:.4f}")
-        print(f"  Val score:   {val_score:.4f}  (OOS)")
-        print(f"  Val return:  {val_ret:.4%}")
-        if val_score > -900 and val_score < self.best_score * 0.3:
-            pct = val_score / self.best_score * 100
-            print(f"  !!! OVERFIT: val_score = {pct:.0f}% of train_score")
+        print(f"  Train IC:    {self.best_score:.4f}")
+        print(f"  Val IC:      {val_ic:.4f}  (OOS)")
+        if val_ic > -900 and val_ic < self.best_score * 0.3:
+            pct = val_ic / self.best_score * 100
+            print(f"  !!! OVERFIT: val_IC = {pct:.0f}% of train_IC")
         print(f"  Best formula: {self.best_formula}")
         print(f"  Saved to: {formula_path}")
 

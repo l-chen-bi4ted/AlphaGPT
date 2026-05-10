@@ -87,7 +87,7 @@ if __name__ == "__main__":
         engine.train()
 
         best_formula = engine.best_formula
-        train_score_raw = engine.best_score
+        train_ic = engine.best_score  # Now IC, not backtest score
 
         # ── 对抗筛选 ──
         if best_formula is None:
@@ -104,25 +104,25 @@ if __name__ == "__main__":
             results.append({
                 "desc": params["desc"],
                 "formula": best_formula,
-                "train_raw": train_score_raw,
+                "train_ic": train_ic,
                 "train_adv": adv_train,
                 "val_adv": adv_val,
                 "val_ret": adv_ret,
                 "n_unique": n_unique,
             })
             marker = "[KEEP]" if adv_val > 0 else "[DROP]"
-            print(f"  => train(raw)={train_score_raw:.2f}  adv_train={adv_train:.2f}  adv_val={adv_val:.2f}  ret={adv_ret:.2%}  {marker}")
+            print(f"  => IC={train_ic:.4f}  adv_train={adv_train:.2f}  adv_val={adv_val:.2f}  ret={adv_ret:.2%}  {marker}")
 
     # ── 汇总 ──
     results.sort(key=lambda x: x["val_adv"], reverse=True)
     print(f"\n{'='*70}")
     print(f"  SWEEP RESULTS: {args.inst_id}")
     print(f"{'='*70}")
-    print(f"  {'Desc':<20} {'Raw':>8} {'AdvTr':>8} {'AdvVal':>8} {'Ret':>8} {'Uniq':>5}")
+    print(f"  {'Desc':<20} {'IC':>8} {'AdvTr':>8} {'AdvVal':>8} {'Ret':>8} {'Uniq':>5}")
     print(f"  {'-'*55}")
     for r in results:
         marker = "[KEEP]" if r["val_adv"] > 0 else "[DROP]"
-        print(f"  {r['desc']:<20} {r['train_raw']:>8.2f} {r['train_adv']:>8.2f} {r['val_adv']:>8.2f} {r['val_ret']:>7.2%} {r['n_unique']:>5}  {marker}")
+        print(f"  {r['desc']:<20} {r['train_ic']:>8.4f} {r['train_adv']:>8.2f} {r['val_adv']:>8.2f} {r['val_ret']:>7.2%} {r['n_unique']:>5}  {marker}")
 
     # ── 保存最优 ──
     best = results[0] if results else None
