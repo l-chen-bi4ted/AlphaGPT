@@ -95,30 +95,35 @@ class CEXBacktest:
 
         median_ret = torch.median(valid_cum)
 
-        # Sharpe（年化近似：假设 1H K 线，T 约 200）
-        mean_pnl = valid_pnl.mean(dim=1)
-        std_pnl = valid_pnl.std(dim=1) + 1e-8
-        sharpe = (mean_pnl / std_pnl).median().item() * np.sqrt(365 * 24)
+        # 多维综合打分（昂贵指标仅在需要时计算）
+        sharpe = 0.0
+        sortino = 0.0
+        win_rate = 0.0
+        max_dd = 0.0
 
-        # Sortino（只惩罚下行）
-        downside = torch.clamp(valid_pnl, max=0)
-        down_std = downside.std(dim=1) + 1e-8
-        sortino = (mean_pnl / down_std).median().item() * np.sqrt(365 * 24)
-
-        # 胜率
-        wins = (valid_pnl > 0).float().sum(dim=1)
-        total_trades = activity[valid].float()
-        win_rate = (wins / (total_trades + 1e-8)).median().item()
-
-        # 最大回撤
-        cumsum = valid_pnl.cumsum(dim=1)
-        running_max = cumsum.cummax(dim=1).values
-        drawdown = running_max - cumsum
-        max_dd = drawdown.max(dim=1).values.median().item()
-
-        # 多维综合打分
         if self.multi_dim:
-            # 每个维度归一化到相似尺度
+            # Sharpe（年化近似：假设 1H K 线，T 约 200）
+            mean_pnl = valid_pnl.mean(dim=1)
+            std_pnl = valid_pnl.std(dim=1) + 1e-8
+            sharpe = (mean_pnl / std_pnl).median().item() * np.sqrt(365 * 24)
+
+            # Sortino（只惩罚下行）
+            downside = torch.clamp(valid_pnl, max=0)
+            down_std = downside.std(dim=1) + 1e-8
+            sortino = (mean_pnl / down_std).median().item() * np.sqrt(365 * 24)
+
+            # 胜率
+            wins = (valid_pnl > 0).float().sum(dim=1)
+            total_trades = activity[valid].float()
+            win_rate = (wins / (total_trades + 1e-8)).median().item()
+
+            # 最大回撤
+            cumsum = valid_pnl.cumsum(dim=1)
+            running_max = cumsum.cummax(dim=1).values
+            drawdown = running_max - cumsum
+            max_dd = drawdown.max(dim=1).values.median().item()
+
+            # 多维综合打分
             score = (
                 np.clip(sharpe, -5, 5) * 0.3
                 + np.clip(sortino, -5, 5) * 0.3
