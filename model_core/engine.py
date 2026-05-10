@@ -151,9 +151,13 @@ class AlphaEngine:
                 for j, ic in enumerate(ics):
                     idx = valid_reward_idx[j]
                     rewards[idx] = ic * 10.0
-                    # 奥卡姆剃刀
-                    n_unique = len(set(seqs[idx].tolist()))
-                    rewards[idx] -= max(0, n_unique - 5) * 0.01
+                    # 奥卡姆剃刀: 唯一算子数 + 重复惩罚
+                    from collections import Counter
+                    counts = Counter(seqs[idx].tolist())
+                    n_unique = len(counts)
+                    max_repeat = max(counts.values())
+                    complexity_penalty = max(0, n_unique - 5) * 0.01 + max(0, max_repeat - 4) * 0.02
+                    rewards[idx] -= complexity_penalty
                     if ic > self.best_score:
                         self.best_score = ic
                         self.best_formula = seqs[idx].tolist()
@@ -168,6 +172,10 @@ class AlphaEngine:
             self.opt.zero_grad()
             loss.backward()
             self.opt.step()
+
+            # 定期清 CUDA 缓存，防显存碎片累积
+            if step % 50 == 0 and ModelConfig.DEVICE.type == "cuda":
+                torch.cuda.empty_cache()
 
             if self.use_lord:
                 self.lord_opt.step()
