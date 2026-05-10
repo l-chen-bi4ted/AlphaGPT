@@ -36,7 +36,7 @@ class SearchSpace:
 
     def total_token_sequences(self) -> int:
         """不考虑栈合法性的全部 token 序列数（上界）。"""
-        vocab = self.n_factors + self.n_ops  # 6 + 12 = 18
+        vocab = self.n_factors + self.n_ops
         return vocab ** self.max_len
 
     @staticmethod
@@ -216,7 +216,7 @@ if __name__ == "__main__":
 
     print(f"Vocab: {sp.n_factors} factors + {sp.n_ops} ops = {sp.n_factors + sp.n_ops}")
     print(f"Max length: {sp.max_len}")
-    print(f"Total sequences: 18^{sp.max_len} = {sp.total_token_sequences():.2e}")
+    print(f"Total sequences: {sp.n_factors + sp.n_ops}^{sp.max_len} = {sp.total_token_sequences():.2e}")
     print(f"Valid rate (MC): {info['valid_rate']*100:.2f}%")
     print(f"Estimated valid: {info['estimated_valid']:.2e} (10^{info['log10_valid']:.1f})")
     print(f"Training coverage: {cov['coverage_pct']:.6f}%")

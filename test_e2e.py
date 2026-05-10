@@ -25,7 +25,7 @@ ModelConfig.TRAIN_STEPS = 50
 ModelConfig.BATCH_SIZE = 256
 
 model = AlphaGPT().to(ModelConfig.DEVICE)
-print(f"Vocab size: {model.vocab_size} (expect 18 = 6 features + 12 ops)")
+print(f"Vocab size: {model.vocab_size} (expect 22 = 6 features + 16 ops)")
 print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
 print()
 
