@@ -207,72 +207,54 @@ class CEXBacktest:
         lag: int = 0,
     ) -> float:
         """
-        计算因子与未来收益的 Rank IC（Spearman 秩相关系数）。
+        向量化 Rank IC — 批量计算所有公式的 Spearman 相关系数。
 
-        不依赖回测收益，只看因子排序和实际收益排序的相关性。
         IC > 0.03 有效，> 0.05 优秀，> 0.1 极强。
-
-        Args:
-            factors: [B, T] 或 [T] 因子时间序列
-            target_ret: [1, T] 目标收益率（已对齐，t 时刻因子预测 t+1→t+2 收益）
-            lag: 额外滞后（0=使用原始 target_ret，N=再延迟 N 期）
-
-        Returns:
-            median IC（跨 batch 的中位数）
         """
         if factors.dim() == 1:
             factors = factors.unsqueeze(0)
         B, T = factors.shape
 
-        # 只取有效区间（目标收益已知的区间）
         valid_len = target_ret.shape[-1] - lag
         if valid_len <= 10:
             return 0.0
 
-        target = target_ret[0, lag:lag + valid_len].cpu().numpy()
-        ics = []
+        target = target_ret[0, lag:lag + valid_len]
+        f_sub = factors[:, :valid_len]
 
-        for i in range(B):
-            f = factors[i, :valid_len].cpu().numpy()
+        # 筛掉 target≈0 的位置
+        mask = torch.abs(target) > 1e-9
+        n_valid = mask.sum().item()
+        if n_valid < 10:
+            return 0.0
 
-            # 跳过常数/无效输出
-            f_std = np.nanstd(f)
-            if f_std < 1e-6 or np.isnan(f_std):
-                ics.append(0.0)
-                continue
+        # 秩转换：两次 argsort
+        f_masked = f_sub[:, mask]                        # [B, N]
+        f_ranks = f_masked.argsort(dim=1).argsort(dim=1).float()
 
-            # 去掉 target_ret 中的零值位置
-            mask = np.abs(target) > 1e-9
-            if mask.sum() < 10:
-                ics.append(0.0)
-                continue
+        t_masked = target[mask]
+        t_ranks = t_masked.argsort().argsort().float()
 
-            try:
-                from scipy.stats import spearmanr
-                ic, _ = spearmanr(f[mask], target[mask])
-            except (ImportError, ModuleNotFoundError):
-                # 纯 numpy 后备：先转秩再算 Pearson
-                from numpy import argsort
-                def rankdata(a):
-                    n = len(a)
-                    ikey = argsort(a)
-                    result = np.empty(n)
-                    result[ikey] = np.arange(1, n + 1)
-                    # 处理并列：取平均秩
-                    for val in np.unique(a):
-                        idx = np.where(a == val)[0]
-                        if len(idx) > 1:
-                            result[idx] = result[idx].mean()
-                    return result
-                f_rank = rankdata(f[mask])
-                t_rank = rankdata(target[mask])
-                ic = np.corrcoef(f_rank, t_rank)[0, 1]
-            except Exception:
-                ic = 0.0
+        # 跳过常数公式
+        f_std = f_ranks.std(dim=1) + 1e-8
+        valid_f = f_std > 1e-6
+        if valid_f.sum() == 0:
+            return 0.0
 
-            ics.append(0.0 if np.isnan(ic) else ic)
+        f_ranks = f_ranks[valid_f]
+        f_mean = f_ranks.mean(dim=1, keepdim=True)
+        t_mean = t_ranks.mean()
+        f_c = f_ranks - f_mean
+        t_c = t_ranks - t_mean
+        cov = (f_c * t_c.unsqueeze(0)).sum(dim=1)
+        f_std_v = f_ranks.std(dim=1) + 1e-8
+        t_std_v = t_ranks.std() + 1e-8
+        ics = cov / (f_std_v * t_std_v * n_valid)
+        ics = torch.nan_to_num(ics, nan=0.0)
 
-        return float(np.median(ics))
+        if ics.numel() == 0:
+            return 0.0
+        return float(ics.median().item())
 
     # ─── 主评估入口 ──────────────────────────────────
     def evaluate(
