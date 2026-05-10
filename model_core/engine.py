@@ -124,7 +124,9 @@ class AlphaEngine:
             seqs = torch.stack(tokens_list, dim=1)  # [B, L]
             rewards = torch.zeros(bs, device=device)
 
-            # 评估每个采样公式 — 用 Rank IC 做 reward（鲁棒、平滑）
+            # 评估 — 批量收集所有有效公式输出，一次 IC 计算
+            valid_outputs = []      # tensor outputs [T]
+            valid_reward_idx = []   # indices into rewards
             for i in range(bs):
                 formula = seqs[i].tolist()
                 res = self.vm.execute(formula, self.train_feat)
@@ -134,21 +136,26 @@ class AlphaEngine:
                 if res.std() < 1e-4:
                     rewards[i] = -2.0
                     continue
+                valid_outputs.append(res[0])  # [T]
+                valid_reward_idx.append(i)
 
-                # Rank IC: 因子排序 vs 未来收益排序的相关性
-                ic = CEXBacktest.compute_rank_ic(res, self.train_target)
-                rewards[i] = ic * 10.0  # IC 0.03→0.3, IC 0.1→1.0
-
-                # 奥卡姆剃刀：公式越复杂微扣
-                n_unique = len(set(formula))
-                rewards[i] -= max(0, n_unique - 5) * 0.01
-
-                if ic > self.best_score:
-                    self.best_score = ic
-                    self.best_formula = formula
-                    tqdm.write(
-                        f"[!] New Best: IC {ic:.4f} | Formula {formula}"
-                    )
+            if valid_outputs:
+                stacked = torch.stack(valid_outputs, dim=0)  # [N, T]
+                ics = CEXBacktest.compute_rank_ic(
+                    stacked, self.train_target, return_all=True
+                )
+                for j, ic in enumerate(ics):
+                    idx = valid_reward_idx[j]
+                    rewards[idx] = ic * 10.0
+                    # 奥卡姆剃刀
+                    n_unique = len(set(seqs[idx].tolist()))
+                    rewards[idx] -= max(0, n_unique - 5) * 0.01
+                    if ic > self.best_score:
+                        self.best_score = ic
+                        self.best_formula = seqs[idx].tolist()
+                        tqdm.write(
+                            f"[!] New Best: IC {ic:.4f} | Formula {self.best_formula}"
+                        )
 
             # REINFORCE 损失
             adv = (rewards - rewards.mean()) / (rewards.std() + 1e-5)

@@ -205,11 +205,10 @@ class CEXBacktest:
         factors: torch.Tensor,
         target_ret: torch.Tensor,
         lag: int = 0,
-    ) -> float:
+        return_all: bool = False,
+    ) -> object:
         """
-        向量化 Rank IC — 批量计算所有公式的 Spearman 相关系数。
-
-        IC > 0.03 有效，> 0.05 优秀，> 0.1 极强。
+        向量化 Rank IC。return_all=True 时返回 list[float]，否则返回 float(median)。
         """
         if factors.dim() == 1:
             factors = factors.unsqueeze(0)
@@ -253,7 +252,9 @@ class CEXBacktest:
         ics = torch.nan_to_num(ics, nan=0.0)
 
         if ics.numel() == 0:
-            return 0.0
+            return [] if return_all else 0.0
+        if return_all:
+            return ics.tolist()
         return float(ics.median().item())
 
     # ─── 主评估入口 ──────────────────────────────────
