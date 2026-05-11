@@ -10,14 +10,16 @@ OKX 公开行情 API 无需鉴权，限频 20 req / 2s。
 import time
 import json
 import os
+import hashlib
 from typing import Optional
+from pathlib import Path
 
 import numpy as np
 import torch
 import requests
 import pandas as pd
 
-from model_core.config import ModelConfig
+from model_core.config import ModelConfig, default_config
 
 # ─── OKX API 常量 ───────────────────────────────────────────
 OKX_REST_URL = "https://www.okx.com"
@@ -80,8 +82,11 @@ def _fetch_candles_page(
                 print(f"  OKX error: {body.get('msg', 'unknown')}")
                 return []
             return [_parse_candle(row) for row in body.get("data", [])]
-        except Exception as e:
+        except requests.RequestException as e:
             print(f"  Fetch error (attempt {attempt+1}): {e}")
+            time.sleep(1)
+        except Exception as e:
+            print(f"  Unexpected error (attempt {attempt+1}): {e}")
             time.sleep(1)
     return []
 
@@ -94,7 +99,7 @@ def fetch_all_candles(
     """
     拉取 instId 的全部历史 K 线，返回 DataFrame (ts, o, h, l, c, vol, volCcy)。
     
-    内部自动分页，先拉近 2 天数据，再补历史。
+    内部自动分页，先拉历史，再补近 2 天数据。
     """
     all_rows = []
 
@@ -107,8 +112,12 @@ def fetch_all_candles(
         all_rows.extend(page)
         if len(page) < 300:
             break
-        after = str(page[-1]["ts"])
-        time.sleep(0.1)  # 温和限频
+        # 用最后一条的 ts 作为下一页 after，但去重避免无限循环
+        last_ts = page[-1]["ts"]
+        if str(last_ts) == after:
+            break
+        after = str(last_ts)
+        time.sleep(0.1)
 
     # 再拉近 2 天数据（可能重叠，后续去重）
     recent = _fetch_candles_page(inst_id, bar, limit=300, use_history=False)
@@ -120,6 +129,20 @@ def fetch_all_candles(
 
     df = pd.DataFrame(all_rows)
     df = df.drop_duplicates("ts").sort_values("ts").reset_index(drop=True)
+    
+    # 连续性检查
+    if len(df) > 1:
+        bar_ms = {
+            "1m": 60_000, "3m": 180_000, "5m": 300_000, "15m": 900_000,
+            "30m": 1_800_000, "1H": 3_600_000, "2H": 7_200_000,
+            "4H": 14_400_000, "6H": 21_600_000, "12H": 43_200_000, "1D": 86_400_000,
+        }.get(bar, 3_600_000)
+        gaps = df["ts"].diff().dropna()
+        expected = bar_ms
+        gap_count = (gaps > expected * 1.5).sum()
+        if gap_count > 0:
+            print(f"  ⚠️  Data gap detected: {gap_count} bars missing (expected ~{expected}ms interval)")
+    
     if limit:
         df = df.tail(limit)
     return df
@@ -142,46 +165,89 @@ class OKXDataLoader:
         limit: int = 2000,
         train_ratio: float = 0.7,
         cache_dir: Optional[str] = None,
+        config: Optional[ModelConfig] = None,
     ):
         self.inst_id = inst_id
         self.bar = bar
         self.limit = limit
         self.train_ratio = train_ratio
-        # 默认缓存目录：项目根 data_cache/
+        self.config = config or default_config
+        
         if cache_dir is None:
             cache_dir = os.path.join(os.path.dirname(__file__), "data_cache")
-        self.cache_dir = cache_dir
+        self.cache_dir = Path(cache_dir)
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
 
         self.feat_tensor: Optional[torch.Tensor] = None
         self.raw_data_cache: Optional[dict] = None
         self.target_ret: Optional[torch.Tensor] = None
-        self.full_df: Optional[pd.DataFrame] = None  # 原始数据（用于回测可视化）
+        self.full_df: Optional[pd.DataFrame] = None
+        self.meta: Optional[dict] = None  # 数据元信息（版本、校验、下载时间）
 
-    def _cache_path(self) -> str:
+    def _cache_path(self) -> Path:
         """本地缓存文件路径：data_cache/BTCUSDT_1H.csv"""
         fname = f"{self.inst_id.replace('-', '')}_{self.bar}.csv"
-        return os.path.join(self.cache_dir, fname)
+        return self.cache_dir / fname
 
-    def load_data(self):
+    def _meta_path(self) -> Path:
+        """元数据路径：data_cache/BTCUSDT_1H.meta.json"""
+        return self.cache_dir / f"{self.inst_id.replace('-', '')}_{self.bar}.meta.json"
+
+    def _compute_meta(self, df: pd.DataFrame) -> dict:
+        """计算数据元信息用于版本校验。"""
+        content = df.to_csv(index=False)
+        return {
+            "inst_id": self.inst_id,
+            "bar": self.bar,
+            "rows": len(df),
+            "ts_min": int(df["ts"].min()) if len(df) else None,
+            "ts_max": int(df["ts"].max()) if len(df) else None,
+            "sha256": hashlib.sha256(content.encode()).hexdigest()[:16],
+            "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+
+    def load_data(self, force_refresh: bool = False):
         """优先读本地 CSV 缓存；无缓存则联网拉取。"""
         cache_path = self._cache_path()
-        if os.path.exists(cache_path):
+        meta_path = self._meta_path()
+
+        if not force_refresh and cache_path.exists():
             print(f"Loading from cache: {cache_path}")
-            df = pd.read_csv(cache_path).tail(self.limit)
-        else:
+            df = pd.read_csv(cache_path)
+            
+            # 校验元数据
+            if meta_path.exists():
+                with open(meta_path) as f:
+                    stored_meta = json.load(f)
+                current_meta = self._compute_meta(df)
+                if stored_meta.get("sha256") != current_meta["sha256"]:
+                    print("  ⚠️  Cache metadata mismatch, forcing refresh...")
+                    force_refresh = True
+            else:
+                print("  ⚠️  No metadata found, will refresh...")
+                force_refresh = True
+
+        if force_refresh or not cache_path.exists():
             print(f"Fetching {self.inst_id} {self.bar} candles from OKX...")
             df = fetch_all_candles(self.inst_id, self.bar, self.limit)
             if df.empty:
                 raise RuntimeError(f"No data for {self.inst_id}")
+            df.to_csv(cache_path, index=False)
+            meta = self._compute_meta(df)
+            with open(meta_path, "w") as f:
+                json.dump(meta, f, indent=2)
+            print(f"  Cached {len(df)} rows to {cache_path}")
+        else:
+            df = pd.read_csv(cache_path)
 
         print(f"  Got {len(df)} candles: {df['ts'].min()} → {df['ts'].max()}")
         self.full_df = df
+        self.meta = self._compute_meta(df)
 
         # 转为张量 [1, T]
-        device = ModelConfig.DEVICE
+        device = self.config.device
         t = lambda col: torch.tensor(df[col].values, dtype=torch.float32, device=device).unsqueeze(0)
 
-        # 用成交量近似流动性（CEX 流动性充足）；FDV 用大常数
         vol_usd = torch.tensor(
             df["vol_ccy"].values, dtype=torch.float32, device=device
         ).unsqueeze(0)
@@ -192,8 +258,8 @@ class OKXDataLoader:
             "low":       t("low"),
             "close":     t("close"),
             "volume":    t("vol"),
-            "liquidity": vol_usd,               # USD 量 ≈ 流动性
-            "fdv":       torch.full_like(vol_usd, 1e12),  # 大常数，liq_score ≈ 1
+            "liquidity": vol_usd,
+            "fdv":       torch.full_like(vol_usd, 1e12),
         }
 
         # 特征张量 [F, 1, T]
@@ -201,8 +267,10 @@ class OKXDataLoader:
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
 
         # 目标：下期收益率（t 时刻因子预测 t→t+1 收益，对齐实盘推理）
+        # 注意：target_ret[t] = log(close[t+1] / close[t])
+        # 最后一个时间点的目标设为 0（无法预测未来）
         close = self.raw_data_cache["close"]  # [1, T]
-        t1 = torch.roll(close, -1, dims=1)
+        t1 = torch.cat([close[:, 1:], torch.zeros_like(close[:, :1])], dim=1)
         self.target_ret = torch.log(t1 / (close + 1e-9))
         self.target_ret[:, -1:] = 0.0
 

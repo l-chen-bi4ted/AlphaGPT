@@ -1,37 +1,34 @@
 #!/usr/bin/env python3
-"""E2E test: data loading → training → formula output."""
+"""E2E test v3: data loading → training → formula output."""
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from model_core.config import ModelConfig
+from model_core.alphagpt import AlphaGPT
+from model_core.vm import StackVM
+from model_core.backtest import CEXBacktest
+import torch
+from torch.distributions import Categorical
+
 print("=== 1. Data Loading ===")
 from okx_data import OKXDataLoader
-loader = OKXDataLoader("BTC-USDT", "1H", 200)
+config = ModelConfig(train_steps=50, batch_size=256)
+loader = OKXDataLoader("BTC-USDT", "1H", 200, config=config)
 loader.load_data()
 print(f"feat_tensor shape: {loader.feat_tensor.shape}")
 print(f"target_ret shape: {loader.target_ret.shape}")
 print()
 
 print("=== 2. Model Init ===")
-from model_core.config import ModelConfig
-from model_core.alphagpt import AlphaGPT
-from model_core.vm import StackVM
-from model_core.backtest import CEXBacktest
-
-import torch
-
-# Override for quick test
-ModelConfig.TRAIN_STEPS = 50
-ModelConfig.BATCH_SIZE = 256
-
-model = AlphaGPT().to(ModelConfig.DEVICE)
+model = AlphaGPT(config=config).to(config.device)
 print(f"Vocab size: {model.vocab_size} (expect 22 = 6 features + 16 ops)")
 print(f"Model params: {sum(p.numel() for p in model.parameters()):,}")
 print()
 
 print("=== 3. VM + Backtest Sanity ===")
 vm = StackVM()
-bt = CEXBacktest()
+bt = CEXBacktest(config=config)
 
 # Simple formula: just feature 0 (RET)
 formula = [0]
@@ -41,22 +38,20 @@ if res is not None:
     print(f"RET-only: score={score:.3f}, ret={ret:.4%}")
 print()
 
-print("=== 4. Training (50 steps) ===")
-from torch.distributions import Categorical
-
-opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
-device = ModelConfig.DEVICE
+print(f"=== 4. Training ({config.train_steps} steps) ===")
+opt = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+device = config.device
 best_score = -float("inf")
 best_formula = None
 
-for step in range(ModelConfig.TRAIN_STEPS):
-    bs = ModelConfig.BATCH_SIZE
+for step in range(config.train_steps):
+    bs = config.batch_size
     inp = torch.zeros((bs, 1), dtype=torch.long, device=device)
 
     log_probs = []
     tokens_list = []
 
-    for _ in range(ModelConfig.MAX_FORMULA_LEN):
+    for _ in range(config.max_formula_len):
         logits, _, _ = model(inp)
         dist = Categorical(logits=logits)
         action = dist.sample()

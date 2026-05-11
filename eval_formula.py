@@ -23,7 +23,7 @@ load_dotenv()
 from okx_data import OKXDataLoader
 from model_core.vm import StackVM
 from model_core.backtest import CEXBacktest
-from model_core.config import ModelConfig
+from model_core.config import ModelConfig, default_config
 from model_core.ops import OPS_CONFIG
 
 

@@ -4,7 +4,7 @@ history-candles 拉历史（>2天前），candles 拉近2天，自动切换。
 用法：python fetch_cache.py
 输出：data_cache/*.csv
 """
-import time, os
+import time, os, json, hashlib
 import requests
 import pandas as pd
 
@@ -61,6 +61,22 @@ def fetch_all(inst_id, bar, limit):
     return pd.DataFrame(rows).drop_duplicates("ts").sort_values("ts").tail(limit)
 
 
+def _write_meta(fp: str, df: pd.DataFrame, inst_id: str, bar: str):
+    content = df.to_csv(index=False)
+    meta = {
+        "inst_id": inst_id,
+        "bar": bar,
+        "rows": len(df),
+        "ts_min": int(df["ts"].min()) if len(df) else None,
+        "ts_max": int(df["ts"].max()) if len(df) else None,
+        "sha256": hashlib.sha256(content.encode()).hexdigest()[:16],
+        "downloaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+    meta_fp = fp.replace(".csv", ".meta.json")
+    with open(meta_fp, "w") as f:
+        json.dump(meta, f, indent=2)
+
+
 os.makedirs(CACHE, exist_ok=True)
 for inst_id, bar, limit in SYMBOLS:
     fn = f"{inst_id.replace('-', '')}_{bar}.csv"
@@ -68,6 +84,7 @@ for inst_id, bar, limit in SYMBOLS:
     print(f"[fetch] {inst_id} {bar} ", end="", flush=True)
     df = fetch_all(inst_id, bar, limit)
     df.to_csv(fp, index=False)
+    _write_meta(fp, df, inst_id, bar)
     print(f"→ {len(df)} rows")
 
 print(f"\nDone. {CACHE}:")

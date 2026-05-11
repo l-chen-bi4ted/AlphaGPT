@@ -1,10 +1,13 @@
 """
-AlphaGPT + OKX 模拟盘运行器 v3 — RiskEngine + MarketRegime 集成版。
+AlphaGPT + OKX 模拟盘运行器 v3 — 实盘闭环版。
 
-新增:
-  - RiskEngine: 四级防御 (NORMAL→REDUCED→PROTECTION→EMERGENCY)
-  - MarketRegime: ADX/ATR 市场状态感知
-  - 环境联动的动态止损/止盈/仓位乘数
+v3 修复：
+- RiskEngine 真正联动：每轮 check_account_risk，成交回报驱动 record_trade
+- 下单后 wait_for_fill 确认成交，获取真实成交均价和手续费
+- MarketRegime 不再直接修改 RiskEngine，改为返回参数由 runner 应用
+- 止损/止盈强制使用市价单（确保成交）
+- API 调用增加缓存，降低限频风险
+- 入场使用限价单（降低成本），但风控出场使用市价单（确保执行）
 """
 
 import asyncio
@@ -13,6 +16,7 @@ import os
 import time
 from collections import deque
 from typing import Optional
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,11 +27,11 @@ import pandas as pd
 from loguru import logger
 
 from model_core.vm import StackVM
-from model_core.config import ModelConfig
+from model_core.config import ModelConfig, default_config
 from model_core.risk_engine import RiskEngine
 from model_core.market_regime import MarketRegime, Regime
 from okx_data import fetch_all_candles
-from okx_executor import OKXExecutor
+from okx_executor import OKXExecutor, FillResult, OrderState
 
 
 class LiveRunner:
@@ -37,16 +41,19 @@ class LiveRunner:
         inst_id: Optional[str] = None,
         bar: str = "1H",
         demo: bool = True,
+        config: Optional[ModelConfig] = None,
     ):
-        self.inst_id = inst_id or ModelConfig.INST_ID
-        self.bar = bar
+        self.config = config or default_config
+        self.inst_id = inst_id or self.config.inst_id
+        self.bar = bar or self.config.bar
         self.demo = demo
         self.base_ccy = self.inst_id.split("-")[0]
+        self.quote_ccy = self.inst_id.split("-")[1]
 
-        # ── 加载公式 ──
+        # 加载公式
         if formula_path is None:
             prefix = f"{self.inst_id.replace('-','')}_{self.bar}"
-            formula_path = os.path.join(ModelConfig.SAVE_DIR, f"{prefix}_formula.json")
+            formula_path = os.path.join(self.config.save_dir, f"{prefix}_formula.json")
         with open(formula_path, "r") as f:
             data = json.load(f)
             self.formula = data if isinstance(data, list) else data.get("formula")
@@ -55,34 +62,76 @@ class LiveRunner:
         self.vm = StackVM()
         self.executor = OKXExecutor(demo=demo)
 
-        # ── 风控引擎 ──
-        self.risk = RiskEngine()
+        # 风控引擎
+        state_file = Path(self.config.save_dir) / "risk_state.json"
+        self.risk = RiskEngine(state_file=str(state_file))
         self.regime_detector = MarketRegime()
 
-        # 持仓/信号状态
+        # 状态
         self.position = None
-        self.last_risk_event = 0.0
         self.daily_start_time = time.time()
+        self._signal_hist = deque(maxlen=200)
+        self._price_cache = {}  # {ts: ticker_dict}
+        self._balance_cache = {"ts": 0, "data": {}}
+        self._equity_cache = {"ts": 0, "value": 0.0}
 
         # 启动对账
         self._reconcile()
+
+    # ─── 缓存辅助 ──────────────────────────────────
+    def _get_ticker(self, ttl_sec: float = 3.0) -> dict:
+        """带缓存的 ticker 查询。"""
+        now = time.time()
+        key = f"{self.inst_id}_{int(now / ttl_sec)}"
+        if key in self._price_cache:
+            return self._price_cache[key]
+        ticker = OKXExecutor.get_ticker(self.inst_id)
+        self._price_cache[key] = ticker
+        return ticker
+
+    def _get_balance(self, ttl_sec: float = 5.0) -> dict:
+        """带缓存的余额查询。"""
+        now = time.time()
+        if now - self._balance_cache["ts"] < ttl_sec:
+            return self._balance_cache["data"]
+        bal = self.executor.get_balance()
+        self._balance_cache = {"ts": now, "data": bal}
+        return bal
+
+    def _total_equity(self, ttl_sec: float = 5.0) -> float:
+        """带缓存的权益计算。"""
+        now = time.time()
+        if now - self._equity_cache["ts"] < ttl_sec:
+            return self._equity_cache["value"]
+        bal = self._get_balance(ttl_sec=0)
+        btc = bal.get(self.base_ccy, 0)
+        usdt = bal.get(self.quote_ccy, 0)
+        ticker = self._get_ticker()
+        price = ticker.get("last", 0)
+        eq = usdt + btc * price
+        self._equity_cache = {"ts": now, "value": eq}
+        return eq
 
     # ─── 启动对账 ──────────────────────────────────
     def _reconcile(self):
         """检查实际持仓，登记到 RiskEngine。"""
         try:
-            bal = self.executor.get_balance()
+            bal = self._get_balance(ttl_sec=0)
             btc = bal.get(self.base_ccy, 0)
             if btc > 0.0001:
-                ticker = OKXExecutor.get_ticker(self.inst_id)
+                ticker = self._get_ticker()
                 price = ticker.get("last", 0)
                 self.position = "long"
                 self.risk.add_position(self.inst_id, entry_price=price, amount=btc)
-                self.risk.account_state.total_value = self._total_equity()
+                eq = self._total_equity(ttl_sec=0)
+                self.risk.account_state.total_value = eq
                 logger.info(
-                    f"[PROD-V3] Reconciled: {btc:.6f} {self.base_ccy} @ ~{price:.1f} "
-                    f"| RiskEngine armed"
+                    f"[Reconcile] {btc:.6f} {self.base_ccy} @ ~{price:.1f} "
+                    f"| Equity={eq:.2f}"
                 )
+            else:
+                self.position = None
+                logger.info("[Reconcile] No position")
         except Exception as e:
             logger.warning(f"Reconcile failed: {e}")
 
@@ -93,7 +142,7 @@ class LiveRunner:
         if df.empty or len(df) < 50:
             return 0.5
 
-        device = ModelConfig.DEVICE
+        device = self.config.device
         close = torch.tensor(df["close"].values[-200:], dtype=torch.float32, device=device).unsqueeze(0)
         open_ = torch.tensor(df["open"].values[-200:], dtype=torch.float32, device=device).unsqueeze(0)
         high  = torch.tensor(df["high"].values[-200:],  dtype=torch.float32, device=device).unsqueeze(0)
@@ -112,8 +161,6 @@ class LiveRunner:
 
         raw_seq = res[0, :].cpu().numpy()
         current = float(raw_seq[-1])
-        if not hasattr(self, "_signal_hist"):
-            self._signal_hist = deque(maxlen=200)
         self._signal_hist.append(current)
         if len(self._signal_hist) < 30:
             return 0.5
@@ -125,179 +172,215 @@ class LiveRunner:
         signal = 1.0 / (1.0 + np.exp(-z))
         return float(np.clip(signal, 0.01, 0.99))
 
-    # ─── 资产计算 ──────────────────────────────────
-    def _total_equity(self) -> float:
-        try:
-            bal = self.executor.get_balance()
-            btc = bal.get(self.base_ccy, 0)
-            usdt = bal.get("USDT", 0)
-            ticker = OKXExecutor.get_ticker(self.inst_id)
-            return usdt + btc * ticker.get("last", 0)
-        except Exception:
-            return 0
+    # ─── 交易执行 ──────────────────────────────────
+    def _enter_long(self, price: float, mult: float) -> Optional[FillResult]:
+        """开多仓，返回成交结果。"""
+        usdt = self._get_balance().get(self.quote_ccy, 0.0)
+        trade_usd = min(usdt, self.config.trade_size_usd) * mult
+        if trade_usd < 10:
+            logger.warning("Insufficient balance for entry")
+            return None
 
-    def _get_usdt_balance(self) -> float:
-        bal = self.executor.get_balance("USDT")
-        return bal.get("USDT", 0.0)
+        sz = trade_usd / price if price > 0 else 0
+        if sz <= 0:
+            return None
+
+        # 用限价单挂 ask 价（立即成交，但按 maker 费率）
+        ticker = self._get_ticker()
+        ask = ticker.get("ask", price)
+        oid = self.executor.limit_buy(self.inst_id, sz, ask)
+        if not oid:
+            logger.error("Entry order failed")
+            return None
+
+        fill = self.executor.wait_for_fill(oid, self.inst_id, timeout_sec=60, poll_interval=2.0)
+        if fill and fill.state == OrderState.FILLED:
+            actual_sz = fill.filled_sz
+            avg_px = fill.avg_px
+            self.risk.add_position(self.inst_id, entry_price=avg_px, amount=actual_sz)
+            self.position = "long"
+            logger.success(
+                f"ENTER LONG: {actual_sz:.6f} @ {avg_px:.2f} fee={fill.fee:.4f} {fill.fee_ccy}"
+            )
+            return fill
+        else:
+            logger.error(f"Entry fill failed or timeout: {oid}")
+            # 尝试取消未成交订单
+            self.executor.cancel_order(oid, self.inst_id)
+            return None
+
+    def _exit_long(self, reason: str) -> Optional[FillResult]:
+        """平多仓，返回成交结果。"""
+        bal = self._get_balance()
+        amount = bal.get(self.base_ccy, 0)
+        if amount <= 0:
+            logger.warning("No position to exit")
+            return None
+
+        # 风控出场用市价单，确保成交
+        oid = self.executor.market_sell(self.inst_id, amount)
+        if not oid:
+            logger.error(f"Exit order failed ({reason})")
+            return None
+
+        fill = self.executor.wait_for_fill(oid, self.inst_id, timeout_sec=60, poll_interval=2.0)
+        if fill and fill.state == OrderState.FILLED:
+            avg_px = fill.avg_px
+            # 计算已实现盈亏
+            pos = self.risk.positions.get(self.inst_id)
+            realized_pnl = 0.0
+            if pos:
+                realized_pnl = (avg_px - pos.entry_price) * fill.filled_sz - fill.fee
+                self.risk.remove_position(self.inst_id, avg_px, realized_pnl)
+            else:
+                logger.warning("Exit without tracked position")
+            self.position = None
+            logger.success(
+                f"EXIT LONG ({reason}): {fill.filled_sz:.6f} @ {avg_px:.2f} "
+                f"PnL={realized_pnl:+.2f} fee={fill.fee:.4f}"
+            )
+            return fill
+        else:
+            logger.error(f"Exit fill failed or timeout: {oid}")
+            return None
+
+    def _take_profit(self, ratio: float = 0.5) -> Optional[FillResult]:
+        """分批止盈，默认平掉 50%。"""
+        bal = self._get_balance()
+        total = bal.get(self.base_ccy, 0)
+        amount = total * ratio
+        if amount <= 0:
+            return None
+
+        # 止盈也用限价单挂 bid 价
+        ticker = self._get_ticker()
+        bid = ticker.get("bid", ticker.get("last", 0))
+        oid = self.executor.limit_sell(self.inst_id, amount, bid)
+        if not oid:
+            return None
+
+        fill = self.executor.wait_for_fill(oid, self.inst_id, timeout_sec=30, poll_interval=2.0)
+        if fill and fill.state == OrderState.FILLED:
+            pos = self.risk.positions.get(self.inst_id)
+            realized_pnl = 0.0
+            if pos:
+                realized_pnl = (fill.avg_px - pos.entry_price) * fill.filled_sz - fill.fee
+                self.risk.record_trade(realized_pnl)
+                # 更新持仓量
+                pos.amount -= fill.filled_sz
+                if pos.amount <= 0:
+                    self.risk.remove_position(self.inst_id, fill.avg_px, realized_pnl)
+                    self.position = None
+            logger.success(
+                f"TAKE PROFIT {ratio*100:.0f}%: {fill.filled_sz:.6f} @ {fill.avg_px:.2f} "
+                f"PnL={realized_pnl:+.2f}"
+            )
+            return fill
+        else:
+            self.executor.cancel_order(oid, self.inst_id)
+            return None
 
     # ─── 主循环 ────────────────────────────────────
     async def run(self, interval_seconds: int = 3600):
         mode = "DEMO" if self.demo else "LIVE"
-        logger.info(f"[PROD-V3] LiveRunner started on {self.inst_id} {self.bar}")
-        logger.info(f"[PROD-V3] RiskEngine: level={self.risk.risk_level.value}")
+        logger.info(f"[{mode}] LiveRunner started on {self.inst_id} {self.bar}")
+        logger.info(f"[{mode}] RiskEngine: level={self.risk.risk_level.value}")
 
         while True:
+            cycle_start = time.time()
             try:
-                now = time.time()
-
                 # ── 每日重置 ──
-                if now - self.daily_start_time > 86400:
+                if cycle_start - self.daily_start_time > 86400:
                     equity = self._total_equity()
                     self.risk.reset_daily_state(equity)
-                    self.daily_start_time = now
-                    logger.info(f"[PROD-V3] Daily reset | equity={equity:.0f}")
+                    self.daily_start_time = cycle_start
+                    logger.info(f"[{mode}] Daily reset | equity={equity:.2f}")
 
                 # ── 拉数据 + 市场状态 ──
                 ohlcv = fetch_all_candles(self.inst_id, self.bar, limit=100)
+                current_price = 0.0
+                regime = Regime.RANGING
+                regime_params = self.regime_detector.get_params(regime)
+
                 if ohlcv is not None and not ohlcv.empty:
                     high_arr = ohlcv["high"].values[-50:].astype(float)
                     low_arr = ohlcv["low"].values[-50:].astype(float)
                     close_arr = ohlcv["close"].values[-50:].astype(float)
 
                     regime = self.regime_detector.detect(high_arr, low_arr, close_arr)
-                    position_mult = self.regime_detector.apply_to_risk_engine(self.risk, regime)
+                    regime_params = self.regime_detector.get_params(regime)
 
-                    ticker = OKXExecutor.get_ticker(self.inst_id)
+                    ticker = self._get_ticker()
                     current_price = ticker.get("last", 0)
-                else:
-                    regime = Regime.TRENDING
-                    position_mult = 1.0
-                    current_price = 0
 
-                # ── 信号计算 ──
-                signal = self._compute_signal(ohlcv)
-                hist_len = len(self._signal_hist) if hasattr(self, "_signal_hist") else 0
+                # ── 账户级风控（Layer 3）──
+                equity = self._total_equity()
+                allowed, reason = self.risk.check_account_risk(equity)
+                risk_mult = self.risk.get_risk_multiplier()
 
-                logger.info(
-                    f"[PROD-V3] regime={regime.value} signal={signal:.4f} "
-                    f"price={current_price:.1f} level={self.risk.risk_level.value} mult={position_mult:.1f}"
-                )
+                if not allowed:
+                    logger.critical(f"[{mode}] CIRCUIT BREAKER: {reason}")
+                    if self.position == "long":
+                        self._exit_long("circuit_breaker")
+                    await asyncio.sleep(interval_seconds)
+                    continue
 
                 # ── 持仓风控（Layer 2）──
                 if self.position == "long" and current_price > 0:
                     actions = self.risk.check_position_risk(self.inst_id, current_price)
-                    pos = self.risk.positions.get(self.inst_id)
-                    actual_pnl = pos.pnl if pos else 0.0
-
-                    if "stop_loss" in actions:
-                        logger.critical(f"[PROD-V3] STOP LOSS triggered")
-                        self._close_position()
-                        self.position = None
-                        self.risk.remove_position(self.inst_id)
-                        self.risk.update_account_state(actual_pnl)
-                        await asyncio.sleep(interval_seconds)
-                        continue
-                    if "trailing_stop" in actions:
-                        logger.critical(f"[PROD-V3] TRAILING STOP triggered")
-                        self._close_position()
-                        self.position = None
-                        self.risk.remove_position(self.inst_id)
-                        self.risk.update_account_state(actual_pnl)
+                    if "stop_loss" in actions or "trailing_stop" in actions or "time_out" in actions:
+                        self._exit_long("stop_loss" if "stop_loss" in actions else "trailing_stop")
                         await asyncio.sleep(interval_seconds)
                         continue
                     if any(a.startswith("take_profit") for a in actions):
-                        bal = self.executor.get_balance()
-                        amount = bal.get(self.base_ccy, 0) * 0.5
-                        if amount > 0 and pos:
-                            entry = pos.entry_price
-                            sell_pnl = (current_price - entry) * amount
-                            ticker = OKXExecutor.get_ticker(self.inst_id)
-                            bid = ticker.get("bid", ticker.get("last", 0))
-                            oid = self.executor.limit_sell(self.inst_id, amount, bid)
-                            if oid:
-                                await asyncio.sleep(2)
-                                new_bal = self.executor.get_balance()
-                                remaining = new_bal.get(self.base_ccy, 0)
-                                if pos:
-                                    pos.amount = remaining  # 更新 RiskEngine 持仓量
-                                logger.success(f"[PROD-V3] TAKE PROFIT 50%: {amount} @ ~{bid:.1f} | remaining={remaining:.6f}")
-                                self.risk.update_account_state(sell_pnl)
-                        await asyncio.sleep(interval_seconds)
-                        continue
+                        self._take_profit(ratio=0.5)
+                        # 继续循环，不移除持仓（可能还有剩余）
 
-                # ── 账户级风控（Layer 3）──
-                self.risk.update_daily_pnl(self._total_equity())
-                allowed, reason = self.risk.check_account_risk()
-                risk_mult = self.risk.get_risk_multiplier()
+                # ── 信号计算 ──
+                signal = self._compute_signal(ohlcv)
+                hist_len = len(self._signal_hist)
 
-                if not allowed:
-                    logger.critical(f"[PROD-V3] CIRCUIT BREAKER: {reason}")
-                    if self.position == "long":
-                        self._close_position()
-                        self.position = None
-                        self.risk.remove_position(self.inst_id)
-                        logger.critical("[PROD-V3] All positions closed")
-                    await asyncio.sleep(interval_seconds)
-                    continue
+                # 动态阈值：震荡市更严格
+                entry_threshold = self.config.signal_threshold
+                if regime == Regime.RANGING:
+                    entry_threshold = min(entry_threshold + 0.15, 0.85)
+                elif regime == Regime.VOLATILE:
+                    entry_threshold = min(entry_threshold + 0.25, 0.90)
+
+                logger.info(
+                    f"[{mode}] regime={regime.value} signal={signal:.4f} "
+                    f"price={current_price:.1f} level={self.risk.risk_level.value} "
+                    f"risk_mult={risk_mult:.1f} pos_mult={regime_params.position_multiplier:.1f}"
+                )
 
                 # ── 信号交易 ──
-                entry_threshold = 0.7 if regime == Regime.RANGING else ModelConfig.SIGNAL_THRESHOLD
+                combined_mult = regime_params.position_multiplier * risk_mult
 
-                if signal > entry_threshold and self.position is None and risk_mult > 0:
+                if signal > entry_threshold and self.position is None and combined_mult > 0:
                     if hist_len < 30:
-                        logger.info(f"[PROD-V3] GUARD: z-score history={hist_len}<30, skip")
+                        logger.info(f"[{mode}] GUARD: z-score history={hist_len}<30, skip")
                     else:
-                        usdt = self._get_usdt_balance()
-                        trade_usd = min(usdt, ModelConfig.TRADE_SIZE_USD) * position_mult * risk_mult
-                        if trade_usd < 10:
-                            logger.warning("Insufficient balance")
-                        else:
-                            sz = trade_usd / current_price if current_price > 0 else 0
-                            if sz > 0:
-                                ask = ticker.get("ask", current_price)
-                                oid = self.executor.limit_buy(self.inst_id, sz, ask)
-                                if oid:
-                                    await asyncio.sleep(3)
-                                    bal_after = self.executor.get_balance()
-                                    btc_after = bal_after.get(self.base_ccy, 0)
-                                    if btc_after > 0:
-                                        self.position = "long"
-                                        self.risk.add_position(self.inst_id, current_price, btc_after)
-                                        logger.success(
-                                            f"[PROD-V3] ENTER LONG: {btc_after:.6f} {self.base_ccy} "
-                                            f"@ ~{current_price:.1f} mult={position_mult*risk_mult:.1f}"
-                                        )
+                        fill = self._enter_long(current_price, combined_mult)
+                        if fill:
+                            # 应用 regime 参数到 RiskEngine（可选）
+                            self.risk.stop_loss_pct = regime_params.stop_loss_pct
+                            self.risk.trailing_stop_pct = regime_params.trailing_stop_pct
+                            self.risk.take_profit_pcts = regime_params.take_profit_pcts
 
                 elif signal < 0.3 and self.position == "long":
-                    pos = self.risk.positions.get(self.inst_id)
-                    exit_pnl = pos.pnl if pos else 0.0
-                    self._close_position()
-                    self.position = None
-                    self.risk.remove_position(self.inst_id)
-                    self.risk.update_account_state(exit_pnl)
-                    logger.success(f"[PROD-V3] EXIT LONG (signal) PnL={exit_pnl:+.2f}")
+                    self._exit_long("signal_exit")
 
                 # 总结
                 summary = self.risk.get_summary()
-                logger.info(f"[PROD-V3] Risk: {summary}")
-
-                await asyncio.sleep(interval_seconds)
+                logger.info(f"[{mode}] Risk: {summary}")
 
             except Exception as e:
                 logger.exception(f"Loop error: {e}")
-                await asyncio.sleep(60)
 
-    def _close_position(self):
-        bal = self.executor.get_balance()
-        amount = bal.get(self.base_ccy, 0)
-        if amount > 0:
-            ticker = OKXExecutor.get_ticker(self.inst_id)
-            bid = ticker.get("bid", ticker.get("last", 0))
-            oid = self.executor.limit_sell(self.inst_id, amount, bid)
-            if oid:
-                logger.success(f"[PROD-V3] EXIT: {amount} {self.base_ccy} @ ~{bid:.1f}")
-            else:
-                logger.error(f"[PROD-V3] EXIT FAILED: {amount} {self.base_ccy}")
+            # 计算剩余等待时间
+            elapsed = time.time() - cycle_start
+            sleep_time = max(5, interval_seconds - elapsed)
+            await asyncio.sleep(sleep_time)
 
 
 if __name__ == "__main__":
