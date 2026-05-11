@@ -61,7 +61,6 @@ class LiveRunner:
 
         # 持仓/信号状态
         self.position = None
-        self.entry_price = 0.0
         self.last_risk_event = 0.0
         self.daily_start_time = time.time()
 
@@ -77,7 +76,6 @@ class LiveRunner:
             if btc > 0.0001:
                 ticker = OKXExecutor.get_ticker(self.inst_id)
                 price = ticker.get("last", 0)
-                self.entry_price = price  # 无法得知真实成本，用现价近似
                 self.position = "long"
                 self.risk.add_position(self.inst_id, entry_price=price, amount=btc)
                 self.risk.account_state.total_value = self._total_equity()
@@ -188,14 +186,15 @@ class LiveRunner:
                 # ── 持仓风控（Layer 2）──
                 if self.position == "long" and current_price > 0:
                     actions = self.risk.check_position_risk(self.inst_id, current_price)
+                    pos = self.risk.positions.get(self.inst_id)
+                    actual_pnl = pos.pnl if pos else 0.0
+
                     if "stop_loss" in actions:
                         logger.critical(f"[PROD-V3] STOP LOSS triggered")
                         self._close_position()
                         self.position = None
                         self.risk.remove_position(self.inst_id)
-                        self.risk.update_account_state(
-                            (current_price - self.entry_price) / self.entry_price * self._total_equity()
-                        )
+                        self.risk.update_account_state(actual_pnl)
                         await asyncio.sleep(interval_seconds)
                         continue
                     if "trailing_stop" in actions:
@@ -203,24 +202,21 @@ class LiveRunner:
                         self._close_position()
                         self.position = None
                         self.risk.remove_position(self.inst_id)
-                        self.risk.update_account_state(
-                            (current_price - self.entry_price) / self.entry_price * self._total_equity()
-                        )
+                        self.risk.update_account_state(actual_pnl)
                         await asyncio.sleep(interval_seconds)
                         continue
                     if any(a.startswith("take_profit") for a in actions):
-                        # 只卖一半
                         bal = self.executor.get_balance()
                         amount = bal.get(self.base_ccy, 0) * 0.5
-                        if amount > 0:
+                        if amount > 0 and pos:
+                            entry = pos.entry_price
+                            sell_pnl = (current_price - entry) * amount
                             ticker = OKXExecutor.get_ticker(self.inst_id)
                             bid = ticker.get("bid", ticker.get("last", 0))
                             oid = self.executor.limit_sell(self.inst_id, amount, bid)
                             if oid:
                                 logger.success(f"[PROD-V3] TAKE PROFIT 50%: {amount} @ ~{bid:.1f}")
-                                self.risk.update_account_state(
-                                    (current_price - self.entry_price) / self.entry_price * amount * current_price
-                                )
+                                self.risk.update_account_state(sell_pnl)
                         await asyncio.sleep(interval_seconds)
                         continue
 
@@ -261,7 +257,6 @@ class LiveRunner:
                                     btc_after = bal_after.get(self.base_ccy, 0)
                                     if btc_after > 0:
                                         self.position = "long"
-                                        self.entry_price = current_price
                                         self.risk.add_position(self.inst_id, current_price, btc_after)
                                         logger.success(
                                             f"[PROD-V3] ENTER LONG: {btc_after:.6f} {self.base_ccy} "
@@ -269,10 +264,13 @@ class LiveRunner:
                                         )
 
                 elif signal < 0.3 and self.position == "long":
+                    pos = self.risk.positions.get(self.inst_id)
+                    exit_pnl = pos.pnl if pos else 0.0
                     self._close_position()
                     self.position = None
                     self.risk.remove_position(self.inst_id)
-                    logger.success("[PROD-V3] EXIT LONG (signal)")
+                    self.risk.update_account_state(exit_pnl)
+                    logger.success(f"[PROD-V3] EXIT LONG (signal) PnL={exit_pnl:+.2f}")
 
                 # 总结
                 summary = self.risk.get_summary()
