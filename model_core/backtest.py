@@ -90,7 +90,7 @@ class CEXBacktest:
         turnover = torch.abs(position - prev_pos)  # [B, T]，每次换手的比例
 
         # 名义成交额 = turnover * trade_size
-        notional_turnover = turnover * self.trade_rate
+        notional_turnover = turnover * self.fee_rate
 
         # 手续费 = 名义成交额 * fee_rate * 2（开+平）
         # 简化：每次换手扣一次双边费用
