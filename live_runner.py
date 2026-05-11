@@ -1,5 +1,5 @@
 """
-AlphaGPT + OKX 模拟盘运行器 v3 — 工业级风控装甲。
+AlphaGPT + OKX 模拟盘运行器 v3 — RiskEngine + MarketRegime 集成版。
 
 新增:
   - RiskEngine: 四级防御 (NORMAL→REDUCED→PROTECTION→EMERGENCY)
