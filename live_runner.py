@@ -215,7 +215,12 @@ class LiveRunner:
                             bid = ticker.get("bid", ticker.get("last", 0))
                             oid = self.executor.limit_sell(self.inst_id, amount, bid)
                             if oid:
-                                logger.success(f"[PROD-V3] TAKE PROFIT 50%: {amount} @ ~{bid:.1f}")
+                                await asyncio.sleep(2)
+                                new_bal = self.executor.get_balance()
+                                remaining = new_bal.get(self.base_ccy, 0)
+                                if pos:
+                                    pos.amount = remaining  # 更新 RiskEngine 持仓量
+                                logger.success(f"[PROD-V3] TAKE PROFIT 50%: {amount} @ ~{bid:.1f} | remaining={remaining:.6f}")
                                 self.risk.update_account_state(sell_pnl)
                         await asyncio.sleep(interval_seconds)
                         continue
