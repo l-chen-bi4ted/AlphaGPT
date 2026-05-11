@@ -200,12 +200,11 @@ class OKXDataLoader:
         from model_core.factors import FeatureEngineer
         self.feat_tensor = FeatureEngineer.compute_features(self.raw_data_cache)
 
-        # 目标：下期收益率
+        # 目标：下期收益率（t 时刻因子预测 t→t+1 收益，对齐实盘推理）
         close = self.raw_data_cache["close"]  # [1, T]
         t1 = torch.roll(close, -1, dims=1)
-        t2 = torch.roll(close, -2, dims=1)
-        self.target_ret = torch.log(t2 / (t1 + 1e-9))
-        self.target_ret[:, -2:] = 0.0
+        self.target_ret = torch.log(t1 / (close + 1e-9))
+        self.target_ret[:, -1:] = 0.0
 
         print(f"Data ready. Shape: {self.feat_tensor.shape}")
 

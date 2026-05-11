@@ -87,7 +87,7 @@ OPS_CONFIG = [
     ('ADD',  lambda x, y: x + y, 2),
     ('SUB',  lambda x, y: x - y, 2),
     ('MUL',  lambda x, y: x * y, 2),
-    ('DIV',  lambda x, y: x / (y + 1e-6), 2),
+    ('DIV',  lambda x, y: torch.where(torch.abs(y) > 1e-5, x / y, torch.zeros_like(x)), 2),
     # 基础一元
     ('NEG',  lambda x: -x, 1),
     ('ABS',  torch.abs, 1),
