@@ -288,6 +288,14 @@ class AlphaEngine:
         device = self.config.device
         bs = self.config.batch_size
         max_len = self.config.max_formula_len
+        accum = max(1, self.config.grad_accum_steps)
+        eff_batch = bs * accum
+
+        # 混合精度
+        scaler = torch.cuda.amp.GradScaler() if (device.type == "cuda" and self.config.use_amp) else None
+        use_amp = scaler is not None
+
+        logger.info(f"[Training] batch={bs} accum={accum} effective={eff_batch} amp={use_amp}")
 
         for step in pbar:
             inp = torch.zeros((bs, 1), dtype=torch.long, device=device)
@@ -295,14 +303,15 @@ class AlphaEngine:
             log_probs = []
             tokens_list = []
 
-            # 自回归采样公式
-            for _ in range(max_len):
-                logits, _, _ = self.model(inp)
-                dist = Categorical(logits=logits)
-                action = dist.sample()
-                log_probs.append(dist.log_prob(action))
-                tokens_list.append(action)
-                inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
+            # 自回归采样公式（混合精度 forward）
+            with torch.cuda.amp.autocast(enabled=use_amp):
+                for _ in range(max_len):
+                    logits, _, _ = self.model(inp)
+                    dist = Categorical(logits=logits)
+                    action = dist.sample()
+                    log_probs.append(dist.log_prob(action))
+                    tokens_list.append(action)
+                    inp = torch.cat([inp, action.unsqueeze(1)], dim=1)
 
             seqs = torch.stack(tokens_list, dim=1)  # [B, L]
             rewards = torch.zeros(bs, device=device)
@@ -327,7 +336,7 @@ class AlphaEngine:
                 ics = CEXBacktest.compute_rank_ic(
                     stacked, self.train_target, return_all=True
                 )
-                # 批量 backtest score（简化，只取 composite）
+                # 批量 backtest score
                 scores = []
                 for j, out in enumerate(valid_outputs):
                     sc, _ = self.bt.evaluate(
@@ -341,16 +350,14 @@ class AlphaEngine:
 
                 for j, (ic, sc) in enumerate(zip(ics, scores)):
                     idx = valid_reward_idx[j]
-                    # 奖励 = IC * 6 + backtest_score * 2 - 复杂度惩罚
                     ic_val = ic if isinstance(ic, float) else ic
                     sc_val = sc.item() if torch.is_tensor(sc) else sc
                     rewards[idx] = ic_val * 6.0 + sc_val * 2.0 - complexity_penalty[j].item()
 
-                    # 更新最优（仅在训练后期或定期）
                     if step % 10 == 0:
                         improved = self._select_best(
                             train_ic=ic_val,
-                            val_ic=ic_val,  # 临时，OOS 会覆盖
+                            val_ic=ic_val,
                             backtest_score=sc_val,
                             formula=seqs[idx].tolist(),
                         )
@@ -362,18 +369,32 @@ class AlphaEngine:
 
             # REINFORCE 损失
             adv = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
-            loss = sum(-lp * adv for lp in log_probs).mean()
+            loss = sum(-lp * adv for lp in log_probs).mean() / accum
 
-            self.opt.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
-            self.opt.step()
+            # 反向传播
+            if use_amp:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
+
+            # 梯度累积步到达才更新
+            if (step + 1) % accum == 0 or step == self.config.train_steps - 1:
+                if use_amp:
+                    scaler.unscale_(self.opt)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+
+                if use_amp:
+                    scaler.step(self.opt)
+                    scaler.update()
+                else:
+                    self.opt.step()
+                self.opt.zero_grad(set_to_none=True)
+
+                if self.use_lord:
+                    self.lord_opt.step()
 
             if step % 50 == 0 and device.type == "cuda":
                 torch.cuda.empty_cache()
-
-            if self.use_lord:
-                self.lord_opt.step()
 
             # ── 定期样本外验证 ──
             if step > 0 and step % self.oos_every == 0 and self.best_formula is not None:

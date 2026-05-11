@@ -242,59 +242,60 @@ class ExhaustiveOracle:
             arity_vec=self.arity_vec,
         )
 
-        for formula, ops_cnt in gen:
-            n_generated += 1
+        with torch.no_grad():
+            for formula, ops_cnt in gen:
+                n_generated += 1
 
-            # 执行公式
-            res = self.vm.execute(formula, train_feat)
-            if res is None or res.std() < 1e-4:
-                continue
+                # 执行公式
+                res = self.vm.execute(formula, train_feat)
+                if res is None or res.std() < 1e-4:
+                    continue
 
-            # 评估
-            ic = CEXBacktest.compute_rank_ic(res, train_target)
-            if ic is None or (isinstance(ic, float) and abs(ic) < 1e-4):
-                continue
+                # 评估
+                ic = CEXBacktest.compute_rank_ic(res, train_target)
+                if ic is None or (isinstance(ic, float) and abs(ic) < 1e-4):
+                    continue
 
-            score, cum_ret = self.bt.evaluate(
-                res, loader.raw_data_cache, train_target
-            )
-            score_f = float(score.item() if torch.is_tensor(score) else score)
-
-            # 复杂度惩罚后的 composite reward
-            composite = score_f - self.ops_penalty_lambda * ops_cnt
-
-            # OOS 验证（仅对 heap 候选做，减少计算量）
-            val_ic = 0.0
-            if len(heap) < topk or composite > heap[0].composite:
-                res_val = self.vm.execute(formula, val_feat)
-                if res_val is not None and res_val.std() > 1e-4:
-                    val_ic = CEXBacktest.compute_rank_ic(res_val, val_target)
-                    val_ic = val_ic if isinstance(val_ic, float) else 0.0
-
-            # 维护 min-heap（按 composite）
-            result = OracleResult(
-                composite=composite,
-                ic=ic if isinstance(ic, float) else 0.0,
-                backtest_score=score_f,
-                ops_cnt=ops_cnt,
-                formula=tuple(formula),
-                val_ic=val_ic,
-            )
-
-            n_eval += 1
-            if len(heap) < topk:
-                heapq.heappush(heap, result)
-            else:
-                if composite > heap[0].composite:
-                    heapq.heapreplace(heap, result)
-
-            if verbose and n_eval % 5000 == 0:
-                elapsed = time.time() - t0
-                best_so_far = max(heap).composite if heap else 0.0
-                logger.info(
-                    f"[Oracle] gen={n_generated:,} eval={n_eval:,} "
-                    f"elapsed={elapsed:.1f}s best_composite={best_so_far:.4f}"
+                score, cum_ret = self.bt.evaluate(
+                    res, loader.raw_data_cache, train_target
                 )
+                score_f = float(score.item() if torch.is_tensor(score) else score)
+
+                # 复杂度惩罚后的 composite reward
+                composite = score_f - self.ops_penalty_lambda * ops_cnt
+
+                # OOS 验证（仅对 heap 候选做，减少计算量）
+                val_ic = 0.0
+                if len(heap) < topk or composite > heap[0].composite:
+                    res_val = self.vm.execute(formula, val_feat)
+                    if res_val is not None and res_val.std() > 1e-4:
+                        val_ic = CEXBacktest.compute_rank_ic(res_val, val_target)
+                        val_ic = val_ic if isinstance(val_ic, float) else 0.0
+
+                # 维护 min-heap（按 composite）
+                result = OracleResult(
+                    composite=composite,
+                    ic=ic if isinstance(ic, float) else 0.0,
+                    backtest_score=score_f,
+                    ops_cnt=ops_cnt,
+                    formula=tuple(formula),
+                    val_ic=val_ic,
+                )
+
+                n_eval += 1
+                if len(heap) < topk:
+                    heapq.heappush(heap, result)
+                else:
+                    if composite > heap[0].composite:
+                        heapq.heapreplace(heap, result)
+
+                if verbose and n_eval % 5000 == 0:
+                    elapsed = time.time() - t0
+                    best_so_far = max(heap).composite if heap else 0.0
+                    logger.info(
+                        f"[Oracle] gen={n_generated:,} eval={n_eval:,} "
+                        f"elapsed={elapsed:.1f}s best_composite={best_so_far:.4f}"
+                    )
 
         # 按 composite 降序返回
         best = sorted(heap, key=lambda x: x.composite, reverse=True)
