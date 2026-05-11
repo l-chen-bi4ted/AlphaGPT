@@ -37,6 +37,10 @@ class AlphaEngine:
         lord_decay_rate: LoRD 衰减强度
         oos_every: 每多少步做一次样本外验证
         early_stop_patience: 早停耐心（OOS score 不提升的步数）
+        pretrain_oracle: 是否先用 oracle 生成 top-k 公式做预训练
+        oracle_max_len: oracle 搜索的最大公式长度（建议 ≤8）
+        oracle_ops_subset: oracle 使用的算子子集
+        oracle_topk: oracle 预训练的样本数
     """
 
     def __init__(
@@ -49,6 +53,10 @@ class AlphaEngine:
         lord_decay_rate: float = 1e-3,
         oos_every: int = 50,
         early_stop_patience: int = 200,
+        pretrain_oracle: bool = False,
+        oracle_max_len: int = 6,
+        oracle_ops_subset: str = "basic",
+        oracle_topk: int = 500,
     ):
         self.config = config or default_config
         self.inst_id = inst_id or self.config.inst_id
@@ -57,6 +65,10 @@ class AlphaEngine:
         self.oos_every = oos_every
         self.early_stop_patience = early_stop_patience
         self.steps_since_improvement = 0
+        self.pretrain_oracle = pretrain_oracle
+        self.oracle_max_len = oracle_max_len
+        self.oracle_ops_subset = oracle_ops_subset
+        self.oracle_topk = oracle_topk
 
         # 延迟导入，避免循环依赖
         from okx_data import OKXDataLoader
@@ -176,11 +188,101 @@ class AlphaEngine:
             "cum_ret": cum_ret,
         }
 
+    def pretrain_from_oracle(self, max_len: int, ops_subset: str, topk: int):
+        """
+        用 ExhaustiveOracle 生成 top-k 公式，对 AlphaGPT 做预训练。
+        让模型先学会生成高 reward 公式的分布，再进入 RL 微调。
+        """
+        from .oracle import ExhaustiveOracle
+
+        logger.info("[Pretrain] Starting Oracle search for pretraining data...")
+        oracle = ExhaustiveOracle(
+            config=self.config,
+            max_len=max_len,
+            min_len=max(3, max_len - 2),
+            ops_subset=ops_subset,
+            k_feats=self.config.input_dim,
+        )
+        results = oracle.search(
+            self.loader, topk=topk, val_split=0.2, verbose=True
+        )
+        if not results:
+            logger.warning("[Pretrain] Oracle found no valid formulas, skipping pretrain")
+            return
+
+        # 取 top 80% 为正样本，bottom 20% 为负样本
+        n_pos = int(topk * 0.8)
+        positive = results[:n_pos]
+        negative = results[-max(10, topk - n_pos):]
+
+        dataset = positive + negative
+        logger.info(f"[Pretrain] Dataset: {len(positive)} pos + {len(negative)} neg = {len(dataset)}")
+
+        # 构建训练数据
+        max_len = self.config.max_formula_len
+        token_seqs = []
+        rewards = []
+        for r in dataset:
+            seq = list(r.formula)
+            # pad 到 max_len（后面补 0，即第一个特征 token）
+            seq = seq + [0] * (max_len - len(seq))
+            token_seqs.append(seq)
+            rewards.append(r.composite)
+
+        token_seqs = torch.tensor(token_seqs, dtype=torch.long, device=self.config.device)
+        rewards_t = torch.tensor(rewards, dtype=torch.float32, device=self.config.device)
+
+        # 预训练：behavior cloning（最大似然）+ reward 加权
+        pretrain_steps = min(200, len(dataset) * 2)
+        pretrain_opt = torch.optim.AdamW(self.model.parameters(), lr=self.config.learning_rate * 2)
+
+        for step in range(pretrain_steps):
+            # 随机采样 batch
+            idx = torch.randint(0, len(dataset), (min(64, len(dataset)),), device=self.config.device)
+            batch_seqs = token_seqs[idx]  # [B, L]
+            batch_rewards = rewards_t[idx]  # [B]
+
+            # Teacher forcing: 输入前 t-1 个 token，预测第 t 个
+            loss = 0.0
+            for t in range(max_len):
+                inp = batch_seqs[:, :t + 1]  # [B, t+1]（包含当前作为 target）
+                if inp.shape[1] == 0:
+                    continue
+                # 实际 target 是第 t 个 token（0-indexed）
+                # 输入是前 t 个，预测第 t 个
+                # 当 t=0 时，输入 batch_seqs[:, :1]，target = batch_seqs[:, 0]
+                # 但模型 forward 输出的是基于输入序列的 next token 预测
+                # 所以输入应为 batch_seqs[:, :t+1]，取最后一个位置的 logits
+                logits, _, _ = self.model(inp)
+                target_t = batch_seqs[:, t]
+                # reward 加权 CE loss：高 reward 样本的梯度权重更大
+                weights = (batch_rewards - batch_rewards.min() + 1e-3) / (batch_rewards.max() - batch_rewards.min() + 1e-3)
+                ce = torch.nn.functional.cross_entropy(logits, target_t, reduction='none')
+                loss += (ce * weights).mean()
+
+            pretrain_opt.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+            pretrain_opt.step()
+
+            if step % 50 == 0:
+                logger.info(f"[Pretrain] step {step}/{pretrain_steps} loss={loss.item():.3f}")
+
+        logger.info("[Pretrain] Oracle pretraining completed")
+
     def train(self):
         label = f"{self.inst_id} {self.bar}"
         logger.info(f"[AlphaGPT CEX Training {label}]")
         if self.use_lord:
             logger.info("  LoRD Regularization: enabled")
+
+        # ── Oracle 预训练 ──
+        if getattr(self, 'pretrain_oracle', False):
+            self.pretrain_from_oracle(
+                max_len=getattr(self, 'oracle_max_len', 6),
+                ops_subset=getattr(self, 'oracle_ops_subset', 'basic'),
+                topk=getattr(self, 'oracle_topk', 500),
+            )
 
         pbar = tqdm(range(self.config.train_steps), desc="Training")
         device = self.config.device
