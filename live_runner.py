@@ -29,11 +29,32 @@ from okx_data import fetch_all_candles
 from okx_executor import OKXExecutor
 
 
-# ─── 风控参数 ──────────────────────────────────
-HARD_STOP_PCT = -0.05       # 硬止损：亏损 5% 强制平仓
-TRAILING_STOP_PCT = 0.06    # 追踪止损：从最高点回撤 6% 平仓
-DAILY_MAX_DD = 0.15         # 单日最大回撤 15% → 熔断
-COOLDOWN_HOURS = 8          # 熔断冷却时间（小时）— 覆盖一个完整交易时区
+# ─── 风控模式（改这一行切换） ──────────────────
+# "conservative": 紧止损 + 低回撤 + 冷却 8h（默认推荐）
+# "aggressive":   宽止损 + 高回撤 + 短冷却 4h（牛市）
+RISK_MODE = "conservative"
+
+# ─── 风控参数（richenlin 双模式设计）───────────
+RISK_PROFILES = {
+    "conservative": {
+        "hard_stop":      -0.05,    # 硬止损 -5%
+        "trailing_stop":   0.06,    # 追踪止损 6%
+        "trailing_activation": 0.03,  # 先盈利 3% 才启用追踪
+        "daily_max_dd":    0.10,    # 单日熔断 10%
+        "cooldown_hours":  8,       # 冷却 8h
+    },
+    "aggressive": {
+        "hard_stop":      -0.08,    # 硬止损 -8%
+        "trailing_stop":   0.10,    # 追踪止损 10%
+        "trailing_activation": 0.05,  # 先盈利 5% 才启用追踪
+        "daily_max_dd":    0.20,    # 单日熔断 20%
+        "cooldown_hours":  4,       # 冷却 4h
+    },
+}
+
+def _cfg(key: str):
+    """读取当前风险模式的配置值。"""
+    return RISK_PROFILES[RISK_MODE][key]
 
 
 class LiveRunner:
@@ -137,17 +158,19 @@ class LiveRunner:
 
     # ─── 风控检查 ──────────────────────────────────
     def _check_risk(self) -> Optional[str]:
-        """
-        返回触发原因字符串，无风险则返回 None。
-        顺序：熔断冷却 → 硬止损 → 追踪止损 → 单日熔断。
-        """
+        """返回触发原因字符串，无风险则返回 None。"""
         now = time.time()
+        hard_stop_pct = _cfg("hard_stop")
+        trail_pct = _cfg("trailing_stop")
+        trail_act = _cfg("trailing_activation")
+        daily_dd_pct = _cfg("daily_max_dd")
+        cooldown_h = _cfg("cooldown_hours")
 
         # 1. 熔断冷却中
         if self.last_risk_event > 0:
             elapsed = (now - self.last_risk_event) / 3600
-            if elapsed < COOLDOWN_HOURS:
-                remaining = COOLDOWN_HOURS - elapsed
+            if elapsed < cooldown_h:
+                remaining = cooldown_h - elapsed
                 logger.info(f"[COOLDOWN] {remaining:.1f}h remaining, skipping trade")
                 return "cooldown"
             else:
@@ -170,29 +193,31 @@ class LiveRunner:
         self.peak_price = max(self.peak_price, current_price)
 
         # 3a. 硬止损
-        if pnl_pct <= HARD_STOP_PCT:
+        if pnl_pct <= hard_stop_pct:
             logger.error(
-                f"[HARD STOP] PnL {pnl_pct:.2%} <= {HARD_STOP_PCT:.2%} "
+                f"[HARD STOP] PnL {pnl_pct:.2%} <= {hard_stop_pct:.2%} "
                 f"(entry={self.entry_price:.1f} now={current_price:.1f})"
             )
             return "hard_stop"
 
-        # 3b. 追踪止损
-        drawdown_from_peak = (current_price - self.peak_price) / self.peak_price
-        if drawdown_from_peak <= -TRAILING_STOP_PCT:
-            logger.error(
-                f"[TRAILING STOP] DD from peak {drawdown_from_peak:.2%} <= {-TRAILING_STOP_PCT:.2%} "
-                f"(peak={self.peak_price:.1f} now={current_price:.1f})"
-            )
-            return "trailing_stop"
-
+        # 3b. 追踪止损（需先盈利激活）
+        if pnl_pct >= trail_act:
+            drawdown_from_peak = (current_price - self.peak_price) / self.peak_price
+            if drawdown_from_peak <= -trail_pct:
+                logger.error(
+                    f"[TRAILING STOP] DD from peak {drawdown_from_peak:.2%} <= "
+                    f"{-trail_pct:.2%} "
+                    f"(peak={self.peak_price:.1f} now={current_price:.1f})"
+                )
+                return "trailing_stop"
         # 4. 单日熔断
         equity = self._total_equity()
         if self.daily_start_equity > 0:
+            daily_max = daily_dd_pct
             daily_pnl = (equity - self.daily_start_equity) / self.daily_start_equity
-            if daily_pnl <= -DAILY_MAX_DD:
+            if daily_pnl <= -daily_max:
                 logger.error(
-                    f"[DAILY DD] {daily_pnl:.2%} <= {-DAILY_MAX_DD:.2%} "
+                    f"[DAILY DD] {daily_pnl:.2%} <= {-daily_max:.2%} "
                     f"(start={self.daily_start_equity:.0f} now={equity:.0f})"
                 )
                 return "daily_dd"
@@ -201,7 +226,8 @@ class LiveRunner:
 
     def _trigger_risk_response(self, reason: str):
         """风控响应：平仓 + 记录 + 熔断冷却。"""
-        logger.critical(f"[RISK EVENT] {reason} — closing position + cooldown {COOLDOWN_HOURS}h")
+        cooldown_h = _cfg("cooldown_hours")
+        logger.critical(f"[RISK EVENT] {reason} — closing position + cooldown {cooldown_h}h")
         self._close_position()
         self.position = None
         self.last_risk_event = time.time()
@@ -225,9 +251,13 @@ class LiveRunner:
     # ─── 主循环 ────────────────────────────────────
     async def run(self, interval_seconds: int = 3600):
         mode = "DEMO" if self.demo else "LIVE"
+        hard_stop_pct = _cfg("hard_stop")
+        trail_pct_val = _cfg("trailing_stop")
+        daily_dd_pct = _cfg("daily_max_dd")
+        cooldown_h = _cfg("cooldown_hours")
         logger.info(f"[{mode}] LiveRunner v2 started on {self.inst_id} {self.bar}")
-        logger.info(f"Risk params: hard={HARD_STOP_PCT:.0%} trail={TRAILING_STOP_PCT:.0%} "
-                     f"daily={DAILY_MAX_DD:.0%} cooldown={COOLDOWN_HOURS}h")
+        logger.info(f"Risk params: hard={hard_stop_pct:.0%} trail={trail_pct_val:.0%} "
+                     f"daily={daily_dd_pct:.0%} cooldown={cooldown_h}h")
 
         # 每日重置计时器
         if self.daily_start_time == 0:
