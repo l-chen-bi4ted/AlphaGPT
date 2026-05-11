@@ -72,6 +72,69 @@ python test_e2e.py
 # 50 步快速训练，验证数据流 + 模型 + VM + 回测链路
 ```
 
+## 离线工作流（macOS ↔ GPU 服务器）
+
+适用于 GPU 服务器无外网（无法访问 OKX API / GitHub）的场景：
+
+```
+┌──────────────┐      bundle_in.tar.gz       ┌──────────────┐
+│   macOS      │ ───────────────────────────→ │  GPU Server  │
+│ (拉数据/实盘) │                            │ (离线训练)   │
+│              │ ←─────────────────────────── │              │
+└──────────────┘      bundle_out.tar.gz       └──────────────┘
+```
+
+### Step 1: macOS 拉取数据
+
+```bash
+python fetch_cache.py
+# 输出: data_cache/BTCUSDT_1H.csv + .meta.json
+```
+
+### Step 2: 打包传到 GPU 服务器
+
+```bash
+# macOS 上打包
+python scripts/sync_bundle.py pack-in data_cache/ bundle_in.tar.gz
+
+# 传到 GPU 服务器（USB / 内网 scp / 任意方式）
+scp bundle_in.tar.gz gpu_server:/path/to/AlphaGPT/
+```
+
+### Step 3: GPU 服务器离线训练
+
+```bash
+# 在 GPU 服务器上解压
+python scripts/sync_bundle.py unpack-in bundle_in.tar.gz
+
+# 训练（不访问任何网络）
+D_MODEL=128 N_LAYER=4 BATCH_SIZE=65536 TRAIN_STEPS=5000 \
+    python scripts/offline_train.py --inst-id BTC-USDT --pretrain-oracle
+
+# 打包结果传回 macOS
+python scripts/sync_bundle.py pack-out output/ bundle_out.tar.gz --inst-id BTC-USDT --bar 1H
+```
+
+### Step 4: macOS 接收结果并跑模拟盘
+
+```bash
+# macOS 上解压结果
+python scripts/sync_bundle.py unpack-out bundle_out.tar.gz output/
+
+# 查看训练出的最优公式
+cat output/BTCUSDT_1H_formula.json
+
+# 启动模拟盘
+python live_runner.py BTC-USDT --demo
+```
+
+### 注意事项
+
+- `data_cache/` 只含公开行情数据（K 线），无 API Key，可任意传输
+- `bundle_out.tar.gz` 含公式和模型权重，建议通过加密通道传输
+- GPU 服务器上 `scripts/offline_train.py` 不会调用任何网络 API，纯本地 CSV 读取
+- 如需增量更新数据，重复 Step 1-2，新的 CSV 会覆盖旧缓存
+
 ## 训练
 
 ### 基础训练

@@ -384,5 +384,21 @@ class LiveRunner:
 
 
 if __name__ == "__main__":
-    runner = LiveRunner(demo=True)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AlphaGPT Live Runner")
+    parser.add_argument("inst_id", nargs="?", default=None, help="Trading pair, e.g. BTC-USDT")
+    parser.add_argument("--demo", action="store_true", help="Use demo/paper trading API")
+    parser.add_argument("--live", action="store_true", help="Use live trading API")
+    parser.add_argument("--formula", default=None, help="Path to formula JSON file")
+    parser.add_argument("--bar", default="1H", help="Bar interval")
+    args = parser.parse_args()
+
+    demo_mode = args.demo or not args.live  # default to demo if neither specified
+    runner = LiveRunner(
+        inst_id=args.inst_id,
+        bar=args.bar,
+        demo=demo_mode,
+        formula_path=args.formula,
+    )
     asyncio.run(runner.run())
