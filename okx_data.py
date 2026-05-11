@@ -141,7 +141,7 @@ def fetch_all_candles(
         expected = bar_ms
         gap_count = (gaps > expected * 1.5).sum()
         if gap_count > 0:
-            print(f"  ⚠️  Data gap detected: {gap_count} bars missing (expected ~{expected}ms interval)")
+            print(f"[WARN] Data gap detected: {gap_count} bars missing (expected ~{expected}ms interval)")
     
     if limit:
         df = df.tail(limit)
@@ -221,10 +221,10 @@ class OKXDataLoader:
                     stored_meta = json.load(f)
                 current_meta = self._compute_meta(df)
                 if stored_meta.get("sha256") != current_meta["sha256"]:
-                    print("  ⚠️  Cache metadata mismatch, forcing refresh...")
+                    print("[WARN] Cache metadata mismatch, forcing refresh...")
                     force_refresh = True
             else:
-                print("  ⚠️  No metadata found, will refresh...")
+                print("[WARN] No metadata found, will refresh...")
                 force_refresh = True
 
         if force_refresh or not cache_path.exists():

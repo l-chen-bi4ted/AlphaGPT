@@ -169,7 +169,7 @@ class OKXExecutor:
 
         ord_id = (data.get("data") or [{}])[0].get("ordId")
         if ord_id:
-            logger.info(f"✓ {side.upper()} {sz} {inst_id} → ordId={ord_id}")
+            logger.info(f"[OK] {side.upper()} {sz} {inst_id} → ordId={ord_id}")
         return ord_id
 
     def market_buy(self, inst_id: str, sz: float) -> Optional[str]:
@@ -247,12 +247,12 @@ class OKXExecutor:
 
             if fill.state == OrderState.FILLED:
                 logger.info(
-                    f"✓ Order {ord_id} filled: sz={fill.filled_sz} "
+                    f"[OK] Order {ord_id} filled: sz={fill.filled_sz} "
                     f"avg_px={fill.avg_px} fee={fill.fee} {fill.fee_ccy}"
                 )
                 return fill
             elif fill.state in (OrderState.CANCELED, OrderState.REJECTED):
-                logger.error(f"✗ Order {ord_id} {fill.state.value}")
+                logger.error(f"[FAIL] Order {ord_id} {fill.state.value}")
                 return fill
             else:
                 logger.debug(f"Order {ord_id} state: {fill.state.value}, waiting...")
