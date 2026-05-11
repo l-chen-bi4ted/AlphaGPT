@@ -1,11 +1,12 @@
 """
-AlphaGPT + OKX 实盘/模拟盘运行器。
+AlphaGPT + OKX 模拟盘运行器 v2 — 风控装甲版。
 
 流程：
   1. 加载训练好的因子公式
-  2. 每 N 分钟拉取最新 K 线
-  3. 计算信号 → 达到阈值则下单
-  4. 管理持仓：止损 / 移动止损 / 信号反转平仓
+  2. 每小时拉取最新 K 线，计算 z-score 信号
+  3. 风控先行：硬止损 -5% / 追踪止损 6% / 单日熔断 15%
+  4. 信号交易：signal > 0.5 买入，signal < 0.3 卖出
+  5. 熔断冷却：风控触发后暂停 24 小时
 """
 
 import asyncio
@@ -28,6 +29,13 @@ from okx_data import fetch_all_candles
 from okx_executor import OKXExecutor
 
 
+# ─── 风控参数 ──────────────────────────────────
+HARD_STOP_PCT = -0.05       # 硬止损：亏损 5% 强制平仓
+TRAILING_STOP_PCT = 0.06    # 追踪止损：从最高点回撤 6% 平仓
+DAILY_MAX_DD = 0.15         # 单日最大回撤 15% → 熔断
+COOLDOWN_HOURS = 24         # 熔断冷却时间（小时）
+
+
 class LiveRunner:
     def __init__(
         self,
@@ -39,6 +47,7 @@ class LiveRunner:
         self.inst_id = inst_id or ModelConfig.INST_ID
         self.bar = bar
         self.demo = demo
+        self.base_ccy = self.inst_id.split("-")[0]
 
         # 加载因子公式
         if formula_path is None:
@@ -53,143 +62,248 @@ class LiveRunner:
         self.vm = StackVM()
         self.executor = OKXExecutor(demo=demo)
 
-        # 启动时检查实际持仓，防止网络抖动导致状态丢失
-        self.position = None
+        # ── 风控状态 ──
+        self.position = None         # "long" | None
+        self.entry_price = 0.0       # 入场价（用于 PnL 计算）
+        self.peak_price = 0.0        # 入场后最高价（追踪止损基准）
+        self.last_risk_event = 0.0   # 上次风控触发时间戳
+        self.daily_start_equity = 0.0  # 当日起始权益（熔断基准）
+        self.daily_start_time = 0.0  # 当日起始时间
+
+        # 启动对账
+        self._reconcile()
+
+    # ─── 启动对账 ──────────────────────────────────
+    def _reconcile(self):
+        """检查实际持仓，设置初始状态。"""
         try:
             bal = self.executor.get_balance()
-            base = self.inst_id.split("-")[0]
-            if bal.get(base, 0) > 0.0001:
+            btc = bal.get(self.base_ccy, 0)
+            if btc > 0.0001:
                 self.position = "long"
-                logger.info(f"Reconciled: existing {base} position ({bal[base]:.6f})")
-        except Exception:
-            pass
+                ticker = OKXExecutor.get_ticker(self.inst_id)
+                current_price = ticker.get("last", 0)
+                self.entry_price = current_price  # 无法得知真实成本，用现价近似
+                self.peak_price = current_price
+                self.daily_start_equity = self._total_equity()
+                self.daily_start_time = time.time()
+                logger.info(
+                    f"Reconciled: {btc:.6f} {self.base_ccy} @ ~{current_price:.1f} "
+                    f"(unknown cost, using current)"
+                )
+        except Exception as e:
+            logger.warning(f"Reconcile failed: {e}")
 
-    # ─── 信号计算 ────────────────────────────────────────
+    # ─── 信号计算 ──────────────────────────────────
     def _compute_signal(self) -> float:
-        """拉取最新数据 → 计算公式 → 滚动 z-score 标准化 → 返回信号。
-
-        不依赖公式输出的绝对值，而是对比历史窗口内的相对强度。
-        适配任何市场（BTC/ETH/SOL/A 股等），自动适应不同价格级别和公式输出尺度。
-        """
+        """拉取 K 线 → 执行公式 → 滚动 z-score → 0~1 信号。"""
         df = fetch_all_candles(self.inst_id, self.bar, limit=200)
         if df.empty or len(df) < 50:
-            logger.warning("Not enough data for signal")
             return 0.5
 
         device = ModelConfig.DEVICE
-
-        close = torch.tensor(
-            df["close"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0)
-        open_ = torch.tensor(
-            df["open"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0)
-        high = torch.tensor(
-            df["high"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0)
-        low = torch.tensor(
-            df["low"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0)
-        vol = torch.tensor(
-            df["vol"].values[-200:], dtype=torch.float32, device=device
-        ).unsqueeze(0)
+        close = torch.tensor(df["close"].values[-200:], dtype=torch.float32, device=device).unsqueeze(0)
+        open_ = torch.tensor(df["open"].values[-200:], dtype=torch.float32, device=device).unsqueeze(0)
+        high  = torch.tensor(df["high"].values[-200:], dtype=torch.float32, device=device).unsqueeze(0)
+        low   = torch.tensor(df["low"].values[-200:], dtype=torch.float32, device=device).unsqueeze(0)
+        vol   = torch.tensor(df["vol"].values[-200:], dtype=torch.float32, device=device).unsqueeze(0)
 
         raw = {
-            "close": close,
-            "open": open_,
-            "high": high,
-            "low": low,
-            "volume": vol,
-            "liquidity": torch.full_like(vol, 1e9),
-            "fdv": torch.full_like(vol, 1e12),
+            "close": close, "open": open_, "high": high, "low": low, "volume": vol,
+            "liquidity": torch.full_like(vol, 1e9), "fdv": torch.full_like(vol, 1e12),
         }
-
         from model_core.factors import FeatureEngineer
-        feat = FeatureEngineer.compute_features(raw)  # [F, 1, T]
-
+        feat = FeatureEngineer.compute_features(raw)
         res = self.vm.execute(self.formula, feat)
         if res is None:
             return 0.5
 
-        # ── 滚动 z-score 标准化 ──
-        # 取整个公式输出序列的最后一帧，放入历史窗口
-        raw_seq = res[0, :].cpu().numpy()  # [T]
+        raw_seq = res[0, :].cpu().numpy()
         current = float(raw_seq[-1])
 
         if not hasattr(self, "_signal_hist"):
             self._signal_hist = deque(maxlen=200)
-
         self._signal_hist.append(current)
 
         if len(self._signal_hist) < 30:
-            # 历史不够，用中性值
             return 0.5
 
         arr = np.array(self._signal_hist)
-        # 用中位数 + MAD 做稳健标准化（不受极端值干扰）
         median = np.median(arr)
         mad = np.median(np.abs(arr - median)) + 1e-8
-        z = 0.6745 * (current - median) / mad  # 近似标准正态 z-score
-
-        # z-score → 0-1 信号
-        # z=0 → 0.5, z=+2 → ~0.88, z=-2 → ~0.12
+        z = 0.6745 * (current - median) / mad
         signal = 1.0 / (1.0 + np.exp(-z))
         return float(np.clip(signal, 0.01, 0.99))
 
-    # ─── 持仓比例 ──────────────────────────────────────
+    # ─── 风控检查 ──────────────────────────────────
+    def _check_risk(self) -> Optional[str]:
+        """
+        返回触发原因字符串，无风险则返回 None。
+        顺序：熔断冷却 → 硬止损 → 追踪止损 → 单日熔断。
+        """
+        now = time.time()
+
+        # 1. 熔断冷却中
+        if self.last_risk_event > 0:
+            elapsed = (now - self.last_risk_event) / 3600
+            if elapsed < COOLDOWN_HOURS:
+                remaining = COOLDOWN_HOURS - elapsed
+                logger.info(f"[COOLDOWN] {remaining:.1f}h remaining, skipping trade")
+                return "cooldown"
+            else:
+                logger.info("[COOLDOWN] expired, resuming")
+                self.last_risk_event = 0.0
+                self.daily_start_time = now
+                self.daily_start_equity = self._total_equity()
+
+        if self.position != "long":
+            return None  # 无持仓，不检查 PnL 风控
+
+        # 2. 当前价格
+        ticker = OKXExecutor.get_ticker(self.inst_id)
+        current_price = ticker.get("last", 0)
+        if current_price <= 0:
+            return None
+
+        # 3. PnL
+        pnl_pct = (current_price - self.entry_price) / self.entry_price
+        self.peak_price = max(self.peak_price, current_price)
+
+        # 3a. 硬止损
+        if pnl_pct <= HARD_STOP_PCT:
+            logger.error(
+                f"[HARD STOP] PnL {pnl_pct:.2%} <= {HARD_STOP_PCT:.2%} "
+                f"(entry={self.entry_price:.1f} now={current_price:.1f})"
+            )
+            return "hard_stop"
+
+        # 3b. 追踪止损
+        drawdown_from_peak = (current_price - self.peak_price) / self.peak_price
+        if drawdown_from_peak <= -TRAILING_STOP_PCT:
+            logger.error(
+                f"[TRAILING STOP] DD from peak {drawdown_from_peak:.2%} <= {-TRAILING_STOP_PCT:.2%} "
+                f"(peak={self.peak_price:.1f} now={current_price:.1f})"
+            )
+            return "trailing_stop"
+
+        # 4. 单日熔断
+        equity = self._total_equity()
+        if self.daily_start_equity > 0:
+            daily_pnl = (equity - self.daily_start_equity) / self.daily_start_equity
+            if daily_pnl <= -DAILY_MAX_DD:
+                logger.error(
+                    f"[DAILY DD] {daily_pnl:.2%} <= {-DAILY_MAX_DD:.2%} "
+                    f"(start={self.daily_start_equity:.0f} now={equity:.0f})"
+                )
+                return "daily_dd"
+
+        return None
+
+    def _trigger_risk_response(self, reason: str):
+        """风控响应：平仓 + 记录 + 熔断冷却。"""
+        logger.critical(f"[RISK EVENT] {reason} — closing position + cooldown {COOLDOWN_HOURS}h")
+        self._close_position()
+        self.position = None
+        self.last_risk_event = time.time()
+
+    # ─── 资产计算 ──────────────────────────────────
+    def _total_equity(self) -> float:
+        """USDT + BTC 市值。"""
+        try:
+            bal = self.executor.get_balance()
+            btc = bal.get(self.base_ccy, 0)
+            usdt = bal.get("USDT", 0)
+            ticker = OKXExecutor.get_ticker(self.inst_id)
+            return usdt + btc * ticker.get("last", 0)
+        except Exception:
+            return 0
+
     def _get_usdt_balance(self) -> float:
         bal = self.executor.get_balance("USDT")
         return bal.get("USDT", 0.0)
 
-    # ─── 主循环 ────────────────────────────────────────
+    # ─── 主循环 ────────────────────────────────────
     async def run(self, interval_seconds: int = 3600):
-        """主循环。interval_seconds 默认 1 小时（与 1H K 线周期一致）。"""
         mode = "DEMO" if self.demo else "LIVE"
-        base_ccy = self.inst_id.split("-")[0]
-        logger.info(f"[{mode}] LiveRunner started on {self.inst_id} {self.bar}")
+        logger.info(f"[{mode}] LiveRunner v2 started on {self.inst_id} {self.bar}")
+        logger.info(f"Risk params: hard={HARD_STOP_PCT:.0%} trail={TRAILING_STOP_PCT:.0%} "
+                     f"daily={DAILY_MAX_DD:.0%} cooldown={COOLDOWN_HOURS}h")
+
+        # 每日重置计时器
+        if self.daily_start_time == 0:
+            self.daily_start_time = time.time()
+            self.daily_start_equity = self._total_equity()
 
         while True:
             try:
+                # ── 每日重置 ──
+                now = time.time()
+                if now - self.daily_start_time > 86400:
+                    self.daily_start_time = now
+                    self.daily_start_equity = self._total_equity()
+                    logger.info("[DAILY RESET] new day, equity baseline updated")
+
+                # ── 风控优先 ──
+                risk_reason = self._check_risk()
+                if risk_reason and risk_reason != "cooldown":
+                    self._trigger_risk_response(risk_reason)
+                    await asyncio.sleep(interval_seconds)
+                    continue
+                elif risk_reason == "cooldown":
+                    # 冷却中仍记录信号（保持 z-score 连续性），但不交易
+                    signal = self._compute_signal()
+                    logger.info(f"[COOLDOWN] Signal: {signal:.4f} (not trading)")
+                    await asyncio.sleep(interval_seconds)
+                    continue
+
+                # ── 信号交易 ──
                 signal = self._compute_signal()
                 logger.info(f"Signal: {signal:.4f}")
 
+                # 初始保护期：z-score 不足时不做买入
+                hist_len = len(self._signal_hist) if hasattr(self, "_signal_hist") else 0
+
                 if signal > ModelConfig.SIGNAL_THRESHOLD and self.position is None:
-                    # 入场：做多
-                    usdt = self._get_usdt_balance()
-                    trade_usd = min(usdt, ModelConfig.TRADE_SIZE_USD)
-                    if trade_usd < 10:
-                        logger.warning("Insufficient balance")
+                    if hist_len < 30:
+                        logger.info(f"[GUARD] Signal {signal:.4f} but z-score history={hist_len}<30, skip buy")
                     else:
-                        ticker = OKXExecutor.get_ticker(self.inst_id)
-                        price = ticker.get("last", 0)
-                        sz = trade_usd / price if price > 0 else 0
-                        if sz > 0:
-                            # 限价买入（ask 价），模拟盘市价单流动性不足
-                            ask = ticker.get("ask", price)
-                            bal_before = self.executor.get_balance()
-                            base_before = bal_before.get(base_ccy, 0)
-                            oid = self.executor.limit_buy(self.inst_id, sz, ask)
-                            if oid:
-                                await asyncio.sleep(3)
-                                bal_after = self.executor.get_balance()
-                                base_after = bal_after.get(base_ccy, 0)
-                                filled = base_after - base_before
-                                if filled > 0:
-                                    self.position = "long"
-                                    logger.success(
-                                        f"ENTER LONG: filled {filled:.6f} {base_ccy} "
-                                        f"(req {sz:.4f}) @ ~{price}  ordId={oid}"
-                                    )
+                        usdt = self._get_usdt_balance()
+                        trade_usd = min(usdt, ModelConfig.TRADE_SIZE_USD)
+                        if trade_usd < 10:
+                            logger.warning("Insufficient balance")
+                        else:
+                            ticker = OKXExecutor.get_ticker(self.inst_id)
+                            price = ticker.get("last", 0)
+                            sz = trade_usd / price if price > 0 else 0
+                            if sz > 0:
+                                ask = ticker.get("ask", price)
+                                bal_before = self.executor.get_balance()
+                                base_before = bal_before.get(self.base_ccy, 0)
+                                oid = self.executor.limit_buy(self.inst_id, sz, ask)
+                                if oid:
+                                    await asyncio.sleep(3)
+                                    bal_after = self.executor.get_balance()
+                                    base_after = bal_after.get(self.base_ccy, 0)
+                                    filled = base_after - base_before
+                                    if filled > 0:
+                                        self.position = "long"
+                                        self.entry_price = price
+                                        self.peak_price = price
+                                        logger.success(
+                                            f"ENTER LONG: {filled:.6f} {self.base_ccy} "
+                                            f"@ ~{price:.1f}  ordId={oid}"
+                                        )
+                                    else:
+                                        logger.warning(f"ORDER NO FILL: ordId={oid}")
                                 else:
-                                    logger.warning(f"ORDER NO FILL: ordId={oid}")
-                            else:
-                                logger.error(f"ORDER FAILED: buy {sz:.4f} {self.inst_id}")
+                                    logger.error(f"ORDER FAILED: buy {sz:.4f} {self.inst_id}")
 
                 elif signal < 0.3 and self.position == "long":
-                    # 平仓
                     self._close_position()
                     self.position = None
-                    logger.success("EXIT LONG")
+                    self.entry_price = 0.0
+                    self.peak_price = 0.0
+                    logger.success("EXIT LONG (signal)")
 
                 await asyncio.sleep(interval_seconds)
 
@@ -199,16 +313,15 @@ class LiveRunner:
 
     def _close_position(self):
         bal = self.executor.get_balance()
-        base = self.inst_id.split("-")[0]
-        amount = bal.get(base, 0)
+        amount = bal.get(self.base_ccy, 0)
         if amount > 0:
             ticker = OKXExecutor.get_ticker(self.inst_id)
             bid = ticker.get("bid", ticker.get("last", 0))
             oid = self.executor.limit_sell(self.inst_id, amount, bid)
             if oid:
-                logger.success(f"EXIT LONG: sold {amount} {base}  ordId={oid}")
+                logger.success(f"EXIT: sold {amount} {self.base_ccy} @ ~{bid:.1f}  ordId={oid}")
             else:
-                logger.error(f"EXIT FAILED: {amount} {base}")
+                logger.error(f"EXIT FAILED: {amount} {self.base_ccy}")
 
 
 if __name__ == "__main__":
