@@ -13,28 +13,28 @@ class ModelConfig:
         "cuda" if torch.cuda.is_available() else "cpu"
     ))
 
-    # ─── GPU 性能调优（3090 24G 专用）──────────────────────
+    # ─── GPU 性能调优 ────────────────────────────────────
     use_amp: bool = field(default_factory=lambda: os.getenv("USE_AMP", "true").lower() in ("true", "1"))
-    """混合精度训练 (torch.cuda.amp)，3090 上速度提升 ~1.5x，显存减半。"""
+    """混合精度训练 (torch.cuda.amp)， Ampere+ GPU 速度提升 ~1.5x，显存减半。"""
 
     compile_model: bool = field(default_factory=lambda: os.getenv("COMPILE_MODEL", "true").lower() in ("true", "1"))
-    """torch.compile (PyTorch 2.0+)，3090 上速度提升 ~20-40%。"""
+    """torch.compile (PyTorch 2.0+)，速度提升 ~20-40%。"""
 
     grad_accum_steps: int = field(default_factory=lambda: int(os.getenv("GRAD_ACCUM_STEPS", "1")))
     """梯度累积步数。effective_batch = batch_size * grad_accum_steps。"""
 
-    # ─── 模型容量（3090 24G 可支撑 d_model=256, n_layer=4, n_head=8）──
+    # ─── 模型容量（24G 显存可支撑 d_model=256, n_layer=4, n_head=8）──
     d_model: int = field(default_factory=lambda: int(os.getenv("D_MODEL", "64")))
-    """模型维度。小内存卡保持 64，3090 24G 建议 128-256。"""
+    """模型维度。小显存保持 64，24G 显存建议 128-256。"""
 
     n_layer: int = field(default_factory=lambda: int(os.getenv("N_LAYER", "2")))
-    """Transformer 层数。3090 建议 4。"""
+    """Transformer 层数。24G 显存建议 4。"""
 
     n_head: int = field(default_factory=lambda: int(os.getenv("N_HEAD", "4")))
     """注意力头数，必须整除 d_model。"""
 
     dim_feedforward: int = field(default_factory=lambda: int(os.getenv("DIM_FEEDFORWARD", "128")))
-    """FFN 中间层维度。默认 2*d_model，3090 可设 512-1024。"""
+    """FFN 中间层维度。默认 2*d_model，24G 显存可设 512-1024。"""
 
     dropout: float = field(default_factory=lambda: float(os.getenv("DROPOUT", "0.1")))
 
@@ -43,7 +43,7 @@ class ModelConfig:
     bar: str = field(default_factory=lambda: os.getenv("OKX_BAR", "1H"))
     candle_limit: int = field(default_factory=lambda: int(os.getenv("OKX_CANDLE_LIMIT", "2000")))
 
-    # ─── 训练超参（3090 24G 建议 batch_size=65536）────────
+    # ─── 训练超参（24G 显存建议 batch_size=65536）────────
     batch_size: int = field(default_factory=lambda: int(os.getenv("BATCH_SIZE", "8192")))
     train_steps: int = field(default_factory=lambda: int(os.getenv("TRAIN_STEPS", "1000")))
     max_formula_len: int = field(default_factory=lambda: int(os.getenv("MAX_FORMULA_LEN", "12")))

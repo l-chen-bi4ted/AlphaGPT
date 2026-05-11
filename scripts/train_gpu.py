@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-3090 24G 一键训练脚本。
+GPU 一键训练脚本。
 
 环境变量（.env 或命令行 export）：
     D_MODEL=128 N_LAYER=4 BATCH_SIZE=65536 TRAIN_STEPS=2000
 
 用法:
     # 基础训练
-    python scripts/train_3090.py
+    python scripts/train_gpu.py
 
     # 大模型 + oracle 预训练
     D_MODEL=256 N_LAYER=4 BATCH_SIZE=131072 TRAIN_STEPS=5000 \
-        python scripts/train_3090.py --pretrain-oracle --inst-id ETH-USDT
+        python scripts/train_gpu.py --pretrain-oracle --inst-id ETH-USDT
 
     # 仅 oracle benchmark（不训练）
-    python scripts/train_3090.py --oracle-only --max-len 8
+    python scripts/train_gpu.py --oracle-only --max-len 8
 """
 
 import argparse
@@ -30,7 +30,7 @@ from model_core.engine import AlphaEngine
 
 
 def main():
-    parser = argparse.ArgumentParser(description="3090 24G Training Script")
+    parser = argparse.ArgumentParser(description="GPU Training Script")
     parser.add_argument("--inst-id", default="BTC-USDT")
     parser.add_argument("--bar", default="1H")
     parser.add_argument("--limit", type=int, default=2000)
