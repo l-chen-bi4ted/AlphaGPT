@@ -33,7 +33,7 @@ from okx_executor import OKXExecutor
 HARD_STOP_PCT = -0.05       # 硬止损：亏损 5% 强制平仓
 TRAILING_STOP_PCT = 0.06    # 追踪止损：从最高点回撤 6% 平仓
 DAILY_MAX_DD = 0.15         # 单日最大回撤 15% → 熔断
-COOLDOWN_HOURS = 24         # 熔断冷却时间（小时）
+COOLDOWN_HOURS = 8          # 熔断冷却时间（小时）— 覆盖一个完整交易时区
 
 
 class LiveRunner:
