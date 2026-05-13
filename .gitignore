@@ -62,3 +62,4 @@ data_cache/
 output/
 
 btc_live_demo_*.log
+\n# Local state\nsignal_state.json\nscreenshots/\n

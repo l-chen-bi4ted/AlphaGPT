@@ -1,257 +1,212 @@
-# AlphaGPT (prod-dev)
+# AlphaGPT — Signal Trading Framework
 
-基于强化学习的符号回归因子挖掘引擎，适配 OKX CEX 现货市场。
-
-prod-dev 是从 prod-v3 经过完整代码审计后的修复分支，主要改动：
-- 消除数据层面的未来函数（`robust_norm`、`target_ret`）
-- 回测加入真实摩擦（滑点、时滞、手续费）
-- RiskEngine 与 live_runner 闭环联动
-- OKX 执行器接入成交回报（`get_order` / `wait_for_fill`）
-- 新增 ExhaustiveOracle 穷举搜索 + RL 预训练蒸馏
-- GPU 训练优化（混合精度、torch.compile、梯度累积、可配置模型容量）
-
-## 文件结构
+基于多因子共识信号 + ADX 市场环境感知的量化交易框架。
+支持 OKX CEX 现货，信号驱动执行 + 网格机器人双轨并行。
 
 ```
-.
-├── live_runner.py          # 实盘入口（风控闭环 + 成交核对）
-├── okx_executor.py         # OKX API 执行器（HMAC-SHA256 + 成交回报）
-├── okx_data.py             # OKX K 线数据加载（含元数据校验）
-├── fetch_cache.py          # 离线数据拉取（带 SHA256 元数据）
-├── eval_formula.py         # 公式审计（对抗评估 + 阈值扫描）
-├── sweep.py                # 超参扫描
-├── train_quick.py          # 快速训练入口
-├── test_e2e.py             # 端到端测试
-├── model_core/
-│   ├── alphagpt.py         # Transformer 策略网络（可配置 d_model/n_layer）
-│   ├── engine.py           # RL 训练引擎（REINFORCE + Oracle 预训练）
-│   ├── oracle.py           # 穷举搜索（finishable pruning + top-k heap）
-│   ├── backtest.py         # CEX 回测（滑点 + 时滞 + 真实手续费）
-│   ├── risk_engine.py      # 四级风控状态机（成交回报驱动）
-│   ├── market_regime.py    # 市场状态检测（ADX/ATR，无未来函数）
-│   ├── vm.py               # StackVM 公式执行（nan/inf 审计日志）
-│   ├── ops.py              # 算子配置（16 个，含时序算子）
-│   ├── factors.py          # 特征工程（滚动 robust_norm，无未来函数）
-│   ├── search_space.py     # 搜索空间分析
-│   └── config.py           # 实例化配置（dataclass，支持并行隔离）
-├── scripts/
-│   ├── train_gpu.py        # GPU 一键训练脚本
-│   └── benchmark_oracle.py # Oracle 基准测试 + IC 景观图
-└── docs/                   # richenlin 拆解分析文档
+                         ┌─────────────────────┐
+                         │    TV Desktop        │
+                         │  (可视化监控/CDP)     │
+                         │   Pine Script 策略   │
+                         │   Bollinger + ADX    │
+                         └─────────┬───────────┘
+                                   │ CDP (port 9222)
+                         ┌─────────▼───────────┐
+                         │  tradingview-mcp     │
+                         │  截图/指标/图表控制  │
+                         └─────────┬───────────┘
+                                   │ 信号参考
+         ┌─────────────────────────┼──────────────────────┐
+         │                         │                      │
+  ┌──────▼──────┐          ┌───────▼──────┐       ┌──────▼──────┐
+  │ signal_bot  │          │  Grid Bot   │       │   OKX CLI   │
+  │ 多因子投票   │          │  BTC/ETH网格 │       │  手动操作    │
+  │ ADX 环境过滤 │          │ 服务端运行   │       │             │
+  │ EMA 平滑确认 │          │ 24/7 自动   │       │             │
+  └──────┬──────┘          └─────────────┘       └─────────────┘
+         │
+  ┌──────▼──────┐
+  │  okx spot   │
+  │  place (CLI)│
+  │  直接下单   │
+  └─────────────┘
 ```
+
+## 分支说明
+
+| 分支 | 用途 |
+|------|------|
+| `prod` | **当前推荐** — 信号交易 + 网格 + 文档 |
+| `prod-dev` | 代码审计修复版，含完整模型训练管线 |
+| `prod-v3` | 旧版 RiskEngine + MarketRegime 总装版 |
+| `backtest-v2` | 回测引擎 + IC reward |
+| `okx_dev` | OKX CEX 适配（稳定） |
+| `main` | 上游原始版本（Solana Meme 币） |
 
 ## 快速开始
 
-### 环境安装
+### 依赖
 
 ```bash
-git clone -b prod-dev https://github.com/l-chen-bi4ted/AlphaGPT.git
-cd AlphaGPT
-python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+# Python 3.10+
+pip install numpy python-dotenv requests
+
+# Node.js 18+（TV MCP Server 可选）
+# OKX CLI
+npm install -g @okx_ai/okx-trade-cli
 ```
 
-### 配置 API Key
+### 配置
 
 ```bash
+# 1. OKX API 凭证
 cp .env.example .env
-# 编辑 .env 填入 OKX API Key
+# 编辑 .env，填入 OKX API Key（实盘 + 模拟盘）
+
+# 2. OKX CLI
+okx config init
+# 按提示选择站点 → 设置模拟盘 → 填入 API Key
+
+# 3. 验证
+okx --demo account balance
+# 应显示模拟盘余额
 ```
 
-### 拉取离线数据
+### 运行信号机器人
 
 ```bash
-python fetch_cache.py
-# 输出: data_cache/BTCUSDT_1H.csv + .meta.json
+python3 signal_bot.py BTC-USDT 1H
 ```
 
-### 端到端测试
+每小时自动运行（cron）：
 
 ```bash
-python test_e2e.py
-# 50 步快速训练，验证数据流 + 模型 + VM + 回测链路
+# crontab -e
+0 * * * * cd /path/to/project && python3 signal_bot.py BTC-USDT 1H
 ```
 
-## 离线工作流（macOS ↔ GPU 服务器）
+## 组件
 
-适用于 GPU 服务器无外网（无法访问 OKX API / GitHub）的场景：
+### signal_bot.py
+
+多因子信号引擎，每小时轮询并自动交易。
+
+**信号流水线**：
 
 ```
-┌──────────────┐      bundle_in.tar.gz       ┌──────────────┐
-│   macOS      │ ───────────────────────────→ │  GPU Server  │
-│ (拉数据/实盘) │                            │ (离线训练)   │
-│              │ ←─────────────────────────── │              │
-└──────────────┘      bundle_out.tar.gz       └──────────────┘
+OKX K线 (200根)
+    │
+    ├─ RET (收益率)        权重 0.35
+    ├─ LIQ (流动性)        权重 0.25  ← Amihud 非流动性指标
+    ├─ PRESSURE (买卖压力) 权重 0.25
+    └─ FOMO (趋势偏离)     权重 0.15  ← 仅高置信度时参与
+    │
+    ▼
+  加权投票 → 符号共识 → EMA3 平滑
+    │
+    ▼
+  ADX 环境检测
+    ├─ TRENDING → 阈值 0.5
+    ├─ RANGING  → 阈值 0.7
+    └─ VOLATILE → 暂停交易
+    │
+    ▼
+  进场确认：连续 2 根 K 线信号同向
+    │
+    ▼
+  执行：okx spot place (市价单)
 ```
 
-### Step 1: macOS 拉取数据
+**持仓退出门禁**（三重保护）:
 
-```bash
-python fetch_cache.py
-# 输出: data_cache/BTCUSDT_1H.csv + .meta.json
-```
-
-### Step 2: 打包传到 GPU 服务器
-
-```bash
-# macOS 上打包
-python scripts/sync_bundle.py pack-in data_cache/ bundle_in.tar.gz
-
-# 传到 GPU 服务器（USB / 内网 scp / 任意方式）
-scp bundle_in.tar.gz gpu_server:/path/to/AlphaGPT/
-```
-
-### Step 3: GPU 服务器离线训练
-
-```bash
-# 在 GPU 服务器上解压
-python scripts/sync_bundle.py unpack-in bundle_in.tar.gz
-
-# 训练（不访问任何网络）
-D_MODEL=128 N_LAYER=4 BATCH_SIZE=65536 TRAIN_STEPS=5000 \
-    python scripts/offline_train.py --inst-id BTC-USDT --pretrain-oracle
-
-# 打包结果传回 macOS
-python scripts/sync_bundle.py pack-out output/ bundle_out.tar.gz --inst-id BTC-USDT --bar 1H
-```
-
-### Step 4: macOS 接收结果并跑模拟盘
-
-```bash
-# macOS 上解压结果
-python scripts/sync_bundle.py unpack-out bundle_out.tar.gz output/
-
-# 查看训练出的最优公式
-cat output/BTCUSDT_1H_formula.json
-
-# 启动模拟盘
-python live_runner.py BTC-USDT --demo
-```
-
-### 注意事项
-
-- `data_cache/` 只含公开行情数据（K 线），无 API Key，可任意传输
-- `bundle_out.tar.gz` 含公式和模型权重，建议通过加密通道传输
-- GPU 服务器上 `scripts/offline_train.py` 不会调用任何网络 API，纯本地 CSV 读取
-- 如需增量更新数据，重复 Step 1-2，新的 CSV 会覆盖旧缓存
-
-## 训练
-
-### 基础训练
-
-```bash
-python scripts/train_gpu.py
-```
-
-### Oracle 预训练 + RL 微调
-
-```bash
-D_MODEL=128 N_LAYER=4 BATCH_SIZE=65536 TRAIN_STEPS=5000 \
-    python scripts/train_gpu.py --pretrain-oracle --inst-id ETH-USDT
-```
-
-### 仅 Oracle 穷举基准（无模型训练）
-
-```bash
-python scripts/benchmark_oracle.py BTC-USDT --max-len 8 --topk 50 --plot
-```
-
-### 超参扫描
-
-```bash
-python sweep.py BTC-USDT
-```
-
-### 环境变量（训练调参）
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `D_MODEL` | 64 | 模型维度，GPU 训练建议 128-256 |
-| `N_LAYER` | 2 | Transformer 层数，建议 4 |
-| `N_HEAD` | 4 | 注意力头数，需整除 d_model |
-| `BATCH_SIZE` | 8192 | 每步采样公式数，GPU 建议 65536-131072 |
-| `GRAD_ACCUM_STEPS` | 1 | 梯度累积步数 |
-| `TRAIN_STEPS` | 1000 | 训练总步数 |
-| `LEARNING_RATE` | 1e-3 | AdamW 学习率 |
-| `USE_AMP` | true | 混合精度训练（FP16/BF16） |
-| `COMPILE_MODEL` | true | torch.compile（PyTorch 2.0+） |
-| `MAX_FORMULA_LEN` | 12 | 最大公式长度 |
-| `SLIPPAGE_BPS` | 5.0 | 回测滑点（万分之五） |
-| `LATENCY_BARS` | 1 | 信号到执行的 K 线延迟 |
-
-## Oracle 穷举搜索
-
-`model_core/oracle.py` 提供带 `finishable pruning` 的穷举搜索，用于：
-
-1. **建立 RL 性能上界**：验证模型搜索质量是否接近全局最优
-2. **生成预训练数据**：top-k 公式蒸馏到 AlphaGPT，降低 RL 收敛难度
-3. **IC 景观分析**：绘制公式长度/算子数 vs IC 的分布图
-
-### 用法
-
-```python
-from model_core.oracle import ExhaustiveOracle
-from model_core.config import ModelConfig
-from okx_data import OKXDataLoader
-
-config = ModelConfig()
-loader = OKXDataLoader("BTC-USDT", "1H", 2000, config=config)
-loader.load_data()
-
-oracle = ExhaustiveOracle(config, max_len=6, ops_subset="basic")
-results = oracle.search(loader, topk=20)
-
-for r in results[:5]:
-    print(f"IC={r.ic:.4f} ValIC={r.val_ic:.4f} Formula={r.formula}")
-```
-
-### 算子子集
-
-| 子集 | 算子 | 搜索空间（L=6） |
-|------|------|----------------|
-| `basic` | ADD,SUB,MUL,DIV,NEG,ABS,SIGN | ~10^5 |
-| `time` | + DELAY1,DECAY,MAX3 | ~10^6 |
-| `ts` | + DELTA5,MA20,STD20,TS_RANK20 | ~10^7 |
-| `all` | 全部 16 个 | ~10^8 |
-
-建议 L≤6 用 `basic/time`，L=8 用 `ts`，L>8 仅用于研究目的。
-
-## 实盘入口
-
-```bash
-# 模拟盘
-OKX_DEMO_API_KEY=xxx OKX_DEMO_SECRET_KEY=xxx OKX_DEMO_PASSPHRASE=xxx \
-    python live_runner.py BTC-USDT --demo
-
-# 实盘（需严格风控配置）
-python live_runner.py BTC-USDT
-```
-
-`live_runner.py` 运行时联动 `RiskEngine`：
-- 每次下单前检查 `risk_engine.can_trade()`
-- 成交后调用 `record_trade()` 更新日回撤/连亏计数
-- 日回撤超阈值自动触发仓位缩放或暂停
-- 信号→限价单/市价止损单，下单后查询成交回报确认
-
-## 核心修复（相比 prod-v3）
-
-| 问题 | 修复 |
+| 条件 | 触发 |
 |------|------|
-| 未来函数 | `robust_norm` 改为滚动窗口；`target_ret` 修正对齐；`MarketRegime` 消除 `np.roll` |
-| 回测零摩擦 | 加入 `slippage_bps`、`latency_bars`、真实手续费扣除 |
-| 风控悬空 | `live_runner` 闭环调用 `RiskEngine.can_trade()` / `record_trade()` |
-| 成交开环 | `okx_executor` 新增 `get_order()` / `wait_for_fill()` 成交回报 |
-| 配置污染 | `ModelConfig` 改为 `dataclass` 实例化，支持多进程隔离 |
-| 模型容量 | 从硬编码 64/2/4 改为从 config 读取，支持 128-256 维度 |
-| 训练效率 | 混合精度 + torch.compile + 梯度累积 |
-| 搜索质量 | Oracle 预训练蒸馏，RL 不再从零随机搜索 |
+| 信号反转 | smoothed < -threshold |
+| 持仓超时 | 24 根 K 线未反转 |
+| 浮盈跟踪 | 盈利 > 2% 后回落 0.5% |
 
-## 参考
+### 网格机器人
 
-- [szd5654125/AlphaGPT](https://github.com/szd5654125/AlphaGPT) — finishable pruning oracle
-- [richenlin/AlphaGPT](https://github.com/richenlin/AlphaGPT) — RiskEngine 参考实现
-- [no_JIT](https://github.com/imbue-bit/no_JIT) — HJI 微分博弈
+OKX 服务端运行，无需本地进程：
 
-## 许可
+```bash
+# 创建 BTC 网格
+okx --demo bot grid create \
+  --instId BTC-USDT \
+  --algoOrdType grid \
+  --maxPx 85000 --minPx 78000 \
+  --gridNum 20 --quoteSz 5000
 
-Apache 2.0
+# 查看状态
+okx --demo bot grid orders --algoOrdType grid
+
+# 停止
+okx --demo bot grid stop --algoId <ID> --algoOrdType grid --instId BTC-USDT
+```
+
+### TV Desktop 可视化（可选）
+
+需要 TradingView Desktop（付费版）+ CDP 调试端口启动：
+
+```bash
+/Applications/TradingView.app/Contents/MacOS/TradingView \
+  --remote-debugging-port=9222
+```
+
+连接 MCP 工具：
+
+```bash
+git clone https://github.com/tradesdontlie/tradingview-mcp.git
+cd tradingview-mcp && npm install
+
+# 检查连接
+node src/cli/index.js status
+
+# 常用操作
+node src/cli/index.js symbol BTCUSDT
+node src/cli/index.js timeframe 60
+node src/cli/index.js indicator add "Bollinger Bands"
+node src/cli/index.js indicator add "Directional Movement"
+node src/cli/index.js screenshot --region chart
+```
+
+## 配置文件
+
+### .env
+
+```
+OKX_API_KEY=your_live_key
+OKX_SECRET_KEY=your_live_secret
+OKX_PASSPHRASE=your_live_passphrase
+OKX_DEMO_API_KEY=your_demo_key
+OKX_DEMO_SECRET_KEY=your_demo_secret
+OKX_DEMO_PASSPHRASE=your_demo_passphrase
+```
+
+### ~/.okx/config.toml
+
+```toml
+default_profile = "demo"
+
+[profiles.demo]
+site = "global"
+demo = true
+api_key = "..."
+secret_key = "..."
+passphrase = "..."
+```
+
+> ⚠️ `passphrase` 等敏感信息以明文存储在此文件中。建议设置文件权限 `chmod 600 ~/.okx/config.toml`。
+
+## 已知问题
+
+| 问题 | 原因 | 解决 |
+|------|------|------|
+| OKX API 连接超时 | macOS LibreSSL + 系统代理 | Python 请求加 `proxies={"http": None, "https": None}` |
+| GBK 编码崩溃 | Windows 终端不支持 emoji | 所有输出用 ASCII 字符 |
+| TV MCP 添加指标失败 | Web 版 vs Desktop 版 UI 差异 | 使用 TradingView Desktop， |
+| OKX Demo 市价单不成交 | 模拟盘流动性不足 | 改用限价单（买=ask，卖=bid） |
+
+## 免责声明
+
+本框架仅供学习和研究目的。信号由多因子模型生成，**历史回测表现不代表未来收益**。使用前请充分测试，量化交易存在本金损失风险。
