@@ -9,6 +9,7 @@ OKX Signal Bot — 合约版（做多 + 做空）
 """
 import sys, os, json, time, subprocess, csv
 import numpy as np
+import csv
 
 load_dotenv = lambda p: None
 if os.path.exists(os.path.expanduser("~/.hermes/.env")):
@@ -123,6 +124,17 @@ def detect_regime(candles):
     adx=compute_adx(np.array([c["high"] for c in candles]),np.array([c["low"] for c in candles]),np.array([c["close"] for c in candles]))
     return "TRENDING" if adx>ADX_TRENDING else ("RANGING" if adx<ADX_RANGING else "VOLATILE")
 
+
+
+def log_trade(action, inst_id, price, amount, signal, regime, pnl=""):
+    """记录交易日志"""
+    now = time.strftime("%Y-%m-%d %H:%M:%S")
+    log_file = os.path.join(os.path.dirname(__file__), "trades_swap.csv")
+    is_new = not os.path.exists(log_file)
+    with open(log_file, "a", newline="") as f:
+        w = csv.writer(f)
+        if is_new: w.writerow(["time","action","instId","price","amount","signal","regime","pnl"])
+        w.writerow([now, action, inst_id, f"{price:.2f}", amount, f"{signal:+.4f}", regime, pnl])
 
 def place_swap(side, amount=CONTRACT_AMOUNT):
     """下单"""

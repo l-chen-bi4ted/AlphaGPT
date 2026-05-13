@@ -10,6 +10,7 @@ OKX Signal Bot — 全自动交易信号发射器（v2 信号质量优化版）
 """
 import sys, os, json, time, subprocess
 import numpy as np
+import csv
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -203,6 +204,19 @@ def ema_smooth(values, period):
     return result
 
 
+
+
+def log_trade(action, inst_id, price, amount, signal, regime, status):
+    """记录交易日志到 CSV"""
+    import os
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_file = os.path.join(os.path.dirname(__file__), "trades_spot.csv")
+    is_new = not os.path.exists(log_file)
+    with open(log_file, "a", newline="") as f:
+        w = csv.writer(f)
+        if is_new: w.writerow(["time","action","instId","price","amount","signal","regime","status"])
+        w.writerow([now, action, inst_id, f"{price:.2f}", amount, f"{signal:+.4f}", regime, status])
+
 def post_signal(action, inst_id, amount="10"):
     if action == "ENTER_LONG": side = "buy"
     elif action == "EXIT_LONG": side = "sell"
@@ -322,11 +336,13 @@ def run(inst_id="BTC-USDT", bar="1H"):
         if status == 200 and "ENTER" in action:
             state["position"] = "LONG" if "LONG" in action else "SHORT"
             state["entry_price"] = last_price
+            log_trade(action, inst_id, last_price, amount, signal, regime, "filled")
             state["entry_time"] = now_str
             state["peak_price"] = last_price
             state["bars_held"] = 0
             state["total_trades"] = state.get("total_trades", 0) + 1
         elif status == 200 and "EXIT" in action:
+            log_trade(action, inst_id, last_price, "100%", signal, regime, "filled")
             state["position"] = None
             state["entry_price"] = 0
             state["entry_time"] = ""
