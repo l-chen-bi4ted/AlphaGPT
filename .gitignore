@@ -62,4 +62,13 @@ data_cache/
 output/
 
 btc_live_demo_*.log
-\n# Local state\nsignal_state.json\nscreenshots/\n
+
+# Local state
+signal_state.json
+signal_swap_state.json
+.review_state.json
+screenshots/
+
+# Trade logs (runtime artifacts)
+trades_spot.csv
+trades_swap.csv
