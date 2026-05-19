@@ -150,7 +150,8 @@ def place_swap(side, amount=CONTRACT_AMOUNT):
             if s.get("position") is not None: cmd.append("--reduceOnly")
         except: pass
     try:
-        r=subprocess.run(cmd,capture_output=True,text=True,timeout=15)
+        env={"HOME":"/Users/tsunemori","PATH":"/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"}
+        r=subprocess.run(cmd,capture_output=True,text=True,timeout=15,env=env)
         if r.returncode==0: return 200, r.stdout.strip()
         return r.returncode, r.stderr.strip() or r.stdout.strip()
     except Exception as e: return 0, str(e)
