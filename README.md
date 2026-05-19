@@ -141,10 +141,6 @@ okx --demo bot dca create \
 3 * * * * cd ~/AlphaGPT-prod && source venv/bin/activate && python3 strategy_review.py
 ```
 
-## macOS Surge 代理注意事项
-
-若使用 Surge 增强模式，确保 `www.okx.com` 和 `aws.okx.com` 规则为 DIRECT，且「重写」功能不对 OKX 域名生效——否则 HMAC 签名会被改写导致 401 Unauthorized。
-
 ## TV Desktop 可视化（可选）
 
 TradingView Desktop + CDP 调试端口：
