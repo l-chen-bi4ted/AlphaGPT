@@ -95,7 +95,9 @@ def compute_factors(candles):
             s=np.std(x[i-w:i])
             if s>0: r[i]=(x[i]-np.mean(x[i-w:i]))/s
         return r
-    return {"RET":zs(ret),"LIQ":zs(liq),"PRESSURE":zs(pressure),"FOMO":zs(fomo)}
+    roc20 = np.zeros(n)
+    roc20[20:] = c[20:]/c[:-20] - 1
+    return {"RET":zs(ret),"LIQ":zs(liq),"PRESSURE":zs(pressure),"FOMO":fomo,"ROC20":roc20}
 
 
 def compute_signal(factors):
@@ -106,8 +108,10 @@ def compute_signal(factors):
     votes.append(np.sign(liq_s-liq_l)); wts.append(0.25)
     votes.append(np.sign(factors["PRESSURE"][-5:].mean())); wts.append(0.25)
     fomo=factors["FOMO"][-5:].mean()
-    if abs(fomo)>2.0: votes.append(np.sign(fomo)); wts.append(0.15)
+    if abs(fomo)>0.02: votes.append(np.sign(fomo)); wts.append(0.15)
     else: votes.append(0); wts.append(0.0)
+    roc20=factors.get("ROC20",np.zeros(1))[-5:].mean()
+    if abs(roc20)>0.01: votes.append(np.sign(roc20)); wts.append(0.20)
     return float(sum(v*w for v,w in zip(votes,wts))/(sum(wts)or 1.0))
 
 

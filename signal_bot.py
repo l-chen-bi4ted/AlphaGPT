@@ -145,6 +145,9 @@ def compute_factors(candles):
         pressure[i] = (closes[i] - lows[i]) / (highs[i] - lows[i] + 1e-12) - 0.5
     ma10 = np.convolve(closes, np.ones(10)/10, mode='same')
     fomo = (closes - ma10) / (ma10 + 1e-12)
+    # ROC20: 趋势动量（只保留方向，不归一化）
+    roc20 = np.zeros(n)
+    roc20[20:] = closes[20:] / closes[:-20] - 1
     dev = np.zeros(n)
     for i in range(14, n):
         dev[i] = np.std(ret[i-13:i+1])
@@ -159,8 +162,9 @@ def compute_factors(candles):
         return r
     return {
         "RET": rolling_zscore(ret), "LIQ": rolling_zscore(liq),
-        "PRESSURE": rolling_zscore(pressure), "FOMO": rolling_zscore(fomo),
+        "PRESSURE": rolling_zscore(pressure), "FOMO": fomo,  # raw value (not z-score — avoids wrong sign during trends)
         "DEV": rolling_zscore(dev), "LOG_VOL": rolling_zscore(log_vol),
+        "ROC20": roc20,
     }
 
 
@@ -185,10 +189,15 @@ def compute_signal(factors):
     votes.append(np.sign(liq_s - liq_l)); wts.append(0.25)
     votes.append(np.sign(factors["PRESSURE"][-5:].mean())); wts.append(0.25)
     fomo = factors["FOMO"][-5:].mean()
-    if abs(fomo) > 2.0:
+    if abs(fomo) > 0.02:
         votes.append(np.sign(fomo)); wts.append(0.2)
     else:
         votes.append(0); wts.append(0.0)
+    roc20 = factors.get("ROC20", [0])
+    if hasattr(roc20[-5:], 'mean'): rv = roc20[-5:].mean()
+    else: rv = roc20[-1] if len(roc20) > 0 else 0
+    if abs(rv) > 0.01:
+        votes.append(np.sign(rv)); wts.append(0.15)
     s = sum(v * w for v, w in zip(votes, wts)) / (sum(wts) or 1.0)
     return float(s)
 
